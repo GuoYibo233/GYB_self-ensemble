@@ -17,7 +17,6 @@ Usage:
     python baseline_generate.py --method per_prompt --dataset webqa --model llama3.2_3b_it
 """
 
-from pdb import set_trace
 import os
 import spacy
 import numpy as np
@@ -26,10 +25,11 @@ from tqdm import tqdm
 import multiprocessing as mp
 import warnings
 
-import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from core.constants import MODEL_PATHs
+from utils import init_spacy, lemmaize_chunk, append_lemmas, single_generation
+
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
 nlp = None
@@ -62,38 +62,6 @@ def append_lemmas(df, results):
     df["answer_lemmas"] = pd.Series(all_answer_lemmas, dtype=object)
     return df
 
-def single_generation(prompts, max_new_tokens=20):
-    """Generate responses using greedy decoding."""
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    model.generation_config.temperature = None
-    model.generation_config.top_p = None
-    model.generation_config.pad_token_id = tokenizer.eos_token_id
-
-    inputs = tokenizer(
-        prompts, return_tensors="pt", 
-        padding=True, truncation=True, 
-        padding_side='left', return_attention_mask=True).to(model.device)
-
-    generated = None
-
-    for _ in range(max_new_tokens):
-        with torch.no_grad():
-            logits = model(inputs["input_ids"], attention_mask=inputs["attention_mask"]).logits[:, -1, :]
-            next_token = torch.argmax(logits, dim=-1).unsqueeze(1)
-
-        inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token], dim=1)
-        inputs["attention_mask"] = torch.cat([inputs["attention_mask"], torch.ones_like(next_token)], dim=1)
-
-        if generated is None:
-            generated = next_token
-        else:
-            generated = torch.cat([generated, next_token], dim=1)
-
-    generated_texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
-    new_generated_texts = [gen.strip() for gen in generated_texts]
-    return new_generated_texts
-
-
 def generate_baseline_origin(dataset, dataloader, model_path, args):
     """
     Baseline 1: Generate using only original questions.
@@ -108,7 +76,7 @@ def generate_baseline_origin(dataset, dataloader, model_path, args):
         print(f"File {dump_file} already exists, skipping generation.")
         print("Use --rewrite to regenerate.")
         return dump_file
-    
+
     print("\n" + "="*70)
     print("Baseline 1: Origin (Attention Mode Baseline)")
     print("="*70)
@@ -123,14 +91,14 @@ def generate_baseline_origin(dataset, dataloader, model_path, args):
 
     df = pd.DataFrame(columns=["uuid", "answers", "question", "prompt", "prediction", "generation"])
     few_shot_context = dataset.get_few_shot_examples()
-    
+
     for uuids, answers, all_paraphrases in tqdm(dataloader, desc="Generating baseline (origin)"):
         # Use only the original questions (paraphrase0)
         original_questions = all_paraphrases[0]
         prompts = dataset.construct_prompts(few_shot_context, original_questions)
-        generations = single_generation(prompts)
+        generations = single_generation(model, tokenizer, prompts)
         predictions = [gen.strip().split('\n')[0] for gen in generations]
-        
+
         items = {
             "uuid": uuids,
             "answers": answers,
@@ -140,14 +108,14 @@ def generate_baseline_origin(dataset, dataloader, model_path, args):
             "generation": generations,
         }
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
-    
+
     # Lemmaize predictions and answers
     print("\nLemmatizing predictions and answers...")
     chunks = np.array_split(df, num_parts)
     with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
         results = pool.map(lemmaize_chunk, chunks)
     df = append_lemmas(df, results)
-    
+
     df.to_feather(dump_file)
     print(f"\n✅ Baseline 1 (origin) results saved to: {dump_file}")
     print(f"   Total samples: {len(df)}")
@@ -168,7 +136,7 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
         print(f"File {dump_file} already exists, skipping generation.")
         print("Use --rewrite to regenerate.")
         return dump_file
-    
+
     print("\n" + "="*70)
     print("Baseline 2: Per-Prompt (Attention Mode Second Baseline)")
     print("="*70)
@@ -182,7 +150,7 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
     tokenizer.pad_token = tokenizer.eos_token
 
     df = pd.DataFrame(columns=["uuid", "answers", "paraphrase", "prompt", "prediction", "generation"])
-    
+
     for uuids, answers, all_paraphrases in tqdm(dataloader, desc="Generating baseline (per_prompt)"):
         preds_in_batch = []
         prompts_in_batch = []
@@ -194,13 +162,13 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
         for paraphrases in all_paraphrases:
             paraphrases_in_batch.extend(paraphrases)
             prompts = dataset.construct_prompts(few_shot_context, paraphrases)
-            generations = single_generation(prompts)
+            generations = single_generation(model, tokenizer, prompts)
             predictions = [gen.strip().split('\n')[0] for gen in generations]
             prompts_in_batch.extend(prompts)
             preds_in_batch.extend(predictions)
             generations_in_batch.extend(generations)
             predictions_in_batch.extend(predictions)
-        
+
         items = {
             "uuid": [uuid[0] for uuid in uuids] * len(all_paraphrases),
             "answers": [ans[0] for ans in answers] * len(all_paraphrases),
@@ -210,14 +178,14 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
             "generation": generations_in_batch,
         }
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
-    
+
     # Lemmaize predictions and answers
     print("\nLemmatizing predictions and answers...")
     chunks = np.array_split(df, num_parts)
     with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
         results = pool.map(lemmaize_chunk, chunks)
     df = append_lemmas(df, results)
-    
+
     df.to_feather(dump_file)
     print(f"\n✅ Baseline 2 (per_prompt) results saved to: {dump_file}")
     print(f"   Total samples: {len(df)}")

@@ -1,12 +1,47 @@
 import re
 import string
+import spacy
 import torch
 import random 
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 
-
 DATASET_ROOT = "/net/tokyo100-10g/data/str01_01/xzhao/datasets/self-ensemble"
+PROJECT_DATASET_ROOT = "/home/xzhao/workspace/GYB_self-ensemble/datasets"
+
+
+def init_spacy():
+    global nlp
+    nlp = spacy.load("en_core_web_lg")
+
+
+def lemmaize_predicts(predict):
+    global nlp
+    doc = nlp(predict)
+    return [token.lemma_.lower() for token in doc]
+
+
+def lemmaize_chunk(chunk):
+    predict_lemmas = []
+    answer_lemmas = []
+    for prediction, answers in tqdm(
+        zip(chunk["prediction"], chunk["answers"]), total=len(chunk)
+    ):
+        predict_lemmas.append(lemmaize_predicts(prediction))
+        answer_lemmas.append([lemmaize_predicts(ans) for ans in answers])
+    return predict_lemmas, answer_lemmas
+
+
+def append_lemmas(df, results):
+    all_predict_lemmas = []
+    all_answer_lemmas = []
+    for predict_lemmas, answer_lemmas in results:
+        all_predict_lemmas.extend(predict_lemmas)
+        all_answer_lemmas.extend(answer_lemmas)
+    df["predict_lemma"] = pd.Series(all_predict_lemmas, dtype=object)
+    df["answer_lemmas"] = pd.Series(all_answer_lemmas, dtype=object)
+    return df
 
 
 def set_seed(seed):
@@ -117,20 +152,46 @@ def normalize_answer(s):
         return str(s).strip()
     else:
         return ""
-    
-# def partial_match(prediction, gold_answers, birdirect=False):
-#     """Return 1 if the prediction matches any gold answer after normalization."""
-#     pred_norm = normalize_answer(prediction)
-#     answer_norms = [normalize_answer(answer) for answer in gold_answers]
 
-#     def is_match(pred, ans):
-#         if birdirect:
-#             return pred in ans or ans in pred
-#         else:
-#             return ans in pred
 
-#     matches = any([is_match(pred_norm, ans) for ans in answer_norms])
-#     return matches
+def single_generation(model, tokenizer, prompts, max_new_tokens=20):
+    """Generate responses using greedy decoding."""
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    model.generation_config.temperature = None
+    model.generation_config.top_p = None
+    model.generation_config.pad_token_id = tokenizer.eos_token_id
+
+    inputs = tokenizer(
+        prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        padding_side="left",
+        return_attention_mask=True,
+    ).to(model.device)
+
+    generated = None
+
+    for _ in range(max_new_tokens):
+        with torch.no_grad():
+            logits = model(
+                inputs["input_ids"], attention_mask=inputs["attention_mask"]
+            ).logits[:, -1, :]
+            next_token = torch.argmax(logits, dim=-1).unsqueeze(1)
+
+        inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token], dim=1)
+        inputs["attention_mask"] = torch.cat(
+            [inputs["attention_mask"], torch.ones_like(next_token)], dim=1
+        )
+
+        if generated is None:
+            generated = next_token
+        else:
+            generated = torch.cat([generated, next_token], dim=1)
+
+    generated_texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
+    new_generated_texts = [gen.strip() for gen in generated_texts]
+    return new_generated_texts
 
 
 def is_matched_str(pred_tokens, gold_tokens, birdirectional=True):

@@ -5,7 +5,6 @@ import os
 HF_HOME = "/net/tokyo100-10g/data/str01_01/y-guo/huggingface_cache"
 os.environ["HF_HOME"] = HF_HOME
 os.environ["HUGGINGFACE_HUB_CACHE"] = HF_HOME
-os.environ["TRANSFORMERS_CACHE"] = HF_HOME
 
 # Model paths - All using HuggingFace Hub IDs
 # Models will be downloaded to: /net/tokyo100-10g/data/str01_01/y-guo/huggingface_cache/hub/

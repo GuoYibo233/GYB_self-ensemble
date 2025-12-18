@@ -29,7 +29,7 @@ import multiprocessing as mp
 import warnings
 
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, BatchEncoding
 
 from constants import MODEL_PATHs
 from utils import DATASET_ROOT, init_spacy, lemmaize_chunk, append_lemmas
@@ -169,13 +169,9 @@ def parse_prompt_segments_with_metadata_new_format(prompt):
     {instruction}
 
     Q: {fs1_para1}
-    Q: {fs1_para2}
-    Q: {fs1_para3}
     A: {fs1_answer}
 
     Q: {fs2_para1}
-    Q: {fs2_para2}
-    Q: {fs2_para3}
     A: {fs2_answer}
 
     Q: {main_question_para1}
@@ -403,71 +399,27 @@ def parse_prompt_segments_with_metadata(prompt, paraphrase_idx):
 
     return segments
 
-
-def concatenate_paraphrases_with_positions(prompt, tokenizer, separator="\n\n"):
-    """
-    Process a SINGLE prompt with ALL paraphrases and segment-level position tracking for MyriadLAMA.
-
-    Modified for MyriadLAMA with complex few-shot masking (NEW FORMAT):
-    - Parses the prompt to identify instruction, few-shot Q/A pairs (with multi-para Qs), and main Q paras
-    - Tracks metadata: paraphrase index, few-shot index, segment type, fs_q_para_idx
-    - Enables masking where:
-      * Paraphrases of same few-shot cannot attend to each other
-      * Paraphrases from different few-shot can attend to each other
-      * Answer parts have normal causal mask
-      * Main question paraphrases are isolated
-
-    Args:
-        prompt: Single prompt string with ALL paraphrases
-        tokenizer: HuggingFace tokenizer
-        separator: Separator token between segments (default: double newline)
-
-    Returns:
-        concatenated_text: Single concatenated string
-        segment_positions: List of (start, end) tuples for each segment
-        segment_metadata: List of metadata dicts for each segment
-        total_length: Total number of tokens
-    """
-    # Parse the prompt to extract segments with metadata (using NEW format parser)
-    segments_with_meta = parse_prompt_segments_with_metadata_new_format(prompt)
-
-    all_segments = []
-    all_metadata = []
-
-    for seg_text, meta in segments_with_meta:
-        all_segments.append(seg_text)
-        all_metadata.append(meta)
-
-    # Tokenize each segment individually
-    tokenized_segments = []
-    sep_tokens = tokenizer.encode(separator, add_special_tokens=False)
-
-    for segment in all_segments:
-        tokens = tokenizer.encode(segment, add_special_tokens=False)
-        tokenized_segments.append(tokens)
-
-    # Build full token sequence and track positions
-    full_tokens = []
+# concatenate_paraphrases_with_positions
+def tokenize_with_segment(prompt, tokenizer, segment_metadata):
     segment_positions = []
-    current_pos = 0
-
-    for i, tokens in enumerate(tokenized_segments):
-        if i > 0:
-            # Add separator
-            full_tokens.extend(sep_tokens)
-            current_pos += len(sep_tokens)
-
-        start_pos = current_pos
-        full_tokens.extend(tokens)
-        current_pos += len(tokens)
-        end_pos = current_pos
-
-        segment_positions.append((start_pos, end_pos))
-
+    context = prompt[: segment_metadata["len_context"]]
+    paraphrases = [
+        prompt[segment_metadata["len_context"] + sum(segment_metadata["len_paras"][:i]): 
+               segment_metadata["len_context"] + sum(segment_metadata["len_paras"][:i+1])] 
+        for i in range(len(segment_metadata["len_paras"]))]
+    full_tokens = tokenizer.encode(context)
+    segment_positions.append({"start": 0, "end": len(full_tokens), "type": "context"})
+    for p in paraphrases:
+        p_tokens = tokenizer.encode(p)[1:]  # Exclude BOS and EOS
+        start = len(full_tokens)
+        end = start + len(p_tokens)
+        segment_positions.append({"start": start, "end": end, "type": "paraphrase"})
+        full_tokens.extend(p_tokens)
+    
     # Decode back to text
     concatenated_text = tokenizer.decode(full_tokens, skip_special_tokens=False)
 
-    return concatenated_text, segment_positions, all_metadata, len(full_tokens)
+    return concatenated_text, full_tokens, segment_positions, len(full_tokens)
 
 
 # ==============================================================================
@@ -475,7 +427,7 @@ def concatenate_paraphrases_with_positions(prompt, tokenizer, separator="\n\n"):
 # ==============================================================================
 
 
-def create_myriadlama_mask(segment_positions, segment_metadata, original_length):
+def create_myriadlama_mask_mod(segment_positions, segment_metadata, original_length):
     """
     Create attention mask for MyriadLAMA with complex few-shot and paraphrase masking.
 
@@ -501,17 +453,14 @@ def create_myriadlama_mask(segment_positions, segment_metadata, original_length)
     Returns:
         mask_mod: Function (b, h, q_idx, kv_idx) -> Tensor[bool]
     """
-    import torch
-
     # Convert segment positions to tensors
     segment_starts = torch.tensor(
-        [start for start, _ in segment_positions], dtype=torch.int64
+        [position["start"] for position in segment_positions], dtype=torch.int64
     )
     segment_ends = torch.tensor(
-        [end for _, end in segment_positions], dtype=torch.int64
+        [position["end"] for position in segment_positions], dtype=torch.int64
     )
-    num_segments = len(segment_positions)
-
+    
     def mask_mod(b, h, q_idx, kv_idx):
         """
         Mask function for MyriadLAMA FlexAttention with complex rules.
@@ -523,145 +472,37 @@ def create_myriadlama_mask(segment_positions, segment_metadata, original_length)
         1. HIGHEST PRIORITY: Causal constraint (cannot attend to future)
         2. Generated tokens (>= original_length) attend to all previous tokens
         3. Within encoding phase, apply complex rules based on segment types
-        """
+        """        
         # Move segment tensors to same device as indices
         device = q_idx.device
         seg_starts = segment_starts.to(device)
         seg_ends = segment_ends.to(device)
-
-        # HIGHEST PRIORITY: Causal constraint - cannot attend to future
+        
+        # 1) HIGHEST PRIORITY: Causal constraint - cannot attend to future
         causal_mask = q_idx >= kv_idx
 
-        # If query is in generation phase, allow attention to all previous tokens (with causal)
+        # 2) If query is in generation phase, allow attention to all previous tokens (with causal)
         is_generated = q_idx >= original_length
 
-        # Find which segment the query and key belong to
+        # 3) Find which segment the query and key belong to
         q_in_segment = (q_idx >= seg_starts) & (q_idx < seg_ends)
         kv_in_segment = (kv_idx >= seg_starts) & (kv_idx < seg_ends)
+        
+        # 4) Mark the self-attention within the same segment as one based on context, para1, para2, ...
+        q_seg_id = q_in_segment.to(torch.int32).argmax()
+        kv_seg_id = kv_in_segment.to(torch.int32).argmax()
+        same_segment = (q_seg_id == kv_seg_id)
+        
+        kv_is_context = (kv_seg_id == 0)
+        intra_segment_or_context = same_segment | kv_is_context
 
-        # Check if both are in same segment
-        same_segment = (q_in_segment & kv_in_segment).any()
-
-        # For complex rules, we need to build a mask using tensor operations
-        # Strategy: Build up conditions as tensors, combine with logical ops
-
-        # Create metadata lookup tensors (convert segment_metadata to tensors)
-        # This avoids .item() calls and Python control flow
-        num_segs = len(segment_metadata)
-
-        # Build metadata tensors for all segments
-        types_list = []
-        paras_list = []
-        fs_list = []
-        fs_q_para_list = []
-
-        for seg_meta in segment_metadata:
-            # Map types to integers for tensor operations
-            type_map = {
-                "instruction": 0,
-                "few_shot_q": 1,
-                "few_shot_a": 2,
-                "question": 3,
-            }
-            types_list.append(type_map.get(seg_meta["type"], -1))
-            paras_list.append(
-                seg_meta["paraphrase_idx"]
-                if seg_meta["paraphrase_idx"] is not None
-                else -1
-            )
-            fs_list.append(
-                seg_meta["few_shot_idx"] if seg_meta["few_shot_idx"] is not None else -1
-            )
-            fs_q_para_list.append(
-                seg_meta.get("fs_q_para_idx", -1)
-                if seg_meta.get("fs_q_para_idx") is not None
-                else -1
-            )
-
-        seg_types = torch.tensor(types_list, dtype=torch.int64, device=device)
-        seg_paras = torch.tensor(paras_list, dtype=torch.int64, device=device)
-        seg_fs = torch.tensor(fs_list, dtype=torch.int64, device=device)
-        seg_fs_q_para = torch.tensor(fs_q_para_list, dtype=torch.int64, device=device)
-
-        # Get query and kv segment metadata using tensor indexing
-        # For each position, find which segment it belongs to using argmax on q_in_segment
-        # If no segment found, will be index 0 but we'll handle with validity check
-        q_seg_idx = torch.argmax(q_in_segment.to(torch.int64))
-        kv_seg_idx = torch.argmax(kv_in_segment.to(torch.int64))
-
-        # Check if indices are valid (actually found a segment)
-        q_valid = q_in_segment.any()
-        kv_valid = kv_in_segment.any()
-        both_valid = q_valid & kv_valid
-
-        # Get metadata for query and kv segments
-        q_type = seg_types[q_seg_idx]
-        kv_type = seg_types[kv_seg_idx]
-        q_para = seg_paras[q_seg_idx]
-        kv_para = seg_paras[kv_seg_idx]
-        q_fs = seg_fs[q_seg_idx]
-        kv_fs = seg_fs[kv_seg_idx]
-        q_fs_q_para_idx = seg_fs_q_para[q_seg_idx]
-        kv_fs_q_para_idx = seg_fs_q_para[kv_seg_idx]
-
-        # Build up the masking logic using pure tensor operations
-        # Type constants for comparison
-        INST = torch.tensor(0, device=device, dtype=torch.int64)
-        FS_Q = torch.tensor(1, device=device, dtype=torch.int64)
-        FS_A = torch.tensor(2, device=device, dtype=torch.int64)
-        QUES = torch.tensor(3, device=device, dtype=torch.int64)
-
-        # Rule 1: Instruction <-> Instruction
-        inst_to_inst = (q_type == INST) & (kv_type == INST)
-
-        # Rule 2: Any -> Instruction
-        any_to_inst = kv_type == INST
-
-        # Rule 3: Few-shot answer rules
-        fs_a_to_own_qs = (
-            (q_type == FS_A) & (kv_type == FS_Q) & (q_para == kv_para) & (q_fs == kv_fs)
+        valid_topology = torch.where(
+            is_generated,
+            torch.tensor(True, device=device), # Generation: attend to all history
+            intra_segment_or_context           # Encoding: isolate paraphrases
         )
-        fs_a_to_diff_fs_q = (q_type == FS_A) & (kv_type == FS_Q) & (q_fs != kv_fs)
-        fs_a_to_diff_fs_a = (q_type == FS_A) & (kv_type == FS_A) & (q_fs != kv_fs)
-        fs_a_to_same_seg_a = (q_type == FS_A) & (kv_type == FS_A) & same_segment
-
-        # Rule 4: Few-shot question paraphrase rules
-        fs_q_same_all = (
-            (q_type == FS_Q)
-            & (kv_type == FS_Q)
-            & (q_fs == kv_fs)
-            & (q_para == kv_para)
-            & (q_fs_q_para_idx == kv_fs_q_para_idx)
-        )
-        fs_q_diff_fs = (q_type == FS_Q) & (kv_type == FS_Q) & (q_fs != kv_fs)
-
-        # Rule 5: Question paraphrase rules
-        ques_same_para = (q_type == QUES) & (kv_type == QUES) & (q_para == kv_para)
-
-        # Rule 6: Question -> Few-shot
-        ques_to_fs = (q_type == QUES) & ((kv_type == FS_Q) | (kv_type == FS_A))
-
-        # Combine all allow rules
-        custom_allow = (
-            inst_to_inst
-            | any_to_inst
-            | fs_a_to_own_qs
-            | fs_a_to_diff_fs_q
-            | fs_a_to_diff_fs_a
-            | fs_a_to_same_seg_a
-            | fs_q_same_all
-            | fs_q_diff_fs
-            | ques_same_para
-            | ques_to_fs
-            | same_segment  # Default: same segment allowed
-        )
-
-        # Final result: causal AND (generated OR (valid custom_allow))
-        # If query is generated, allow all causal attention
-        # Otherwise, only allow if both positions are valid AND custom rules allow
-        result = causal_mask & (is_generated | (both_valid & custom_allow))
-
-        return result
+        final_mask = valid_topology & causal_mask
+        return final_mask
 
     return mask_mod
 
@@ -705,9 +546,10 @@ class FlexAttentionWrapper:
                     cache_position,
                     **kwargs,
                 )
+
             # Extract position embeddings
             cos, sin = position_embeddings
-
+            
             # Compute Q, K, V projections
             query_states = original_attn.q_proj(hidden_states)
             key_states = original_attn.k_proj(hidden_states)
@@ -813,7 +655,7 @@ class FlexAttentionWrapper:
 
 
 @torch.no_grad()
-def myriadlama_flex_generation(prompt, max_new_tokens=10):
+def myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10, modify_rope=False):
     """
     Generate text using FlexAttention for MyriadLAMA.
 
@@ -826,50 +668,71 @@ def myriadlama_flex_generation(prompt, max_new_tokens=10):
 
     Args:
         prompt: Single prompt string with ALL paraphrases
+        segment_metadata: Metadata dict with segment lengths and types
+            E.g., `{'len_context': 397, 'len_paras': [25, 34, 19]}`
         max_new_tokens: Maximum tokens to generate (default: 10 for one-word answers)
 
     Returns:
         Generated text string
     """
+
     # Set model config
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model.generation_config.temperature = None
     model.generation_config.top_p = None
     model.generation_config.pad_token_id = tokenizer.eos_token_id
 
+    paraphrases = []
+    for i, length in enumerate(segment_metadata["len_paras"]):
+        start = segment_metadata["len_context"] + sum(segment_metadata["len_paras"][:i])
+        end = start + length
+        paraphrases.append(prompt[start:end])
+    
     # Process prompt with position tracking and metadata
-    concatenated_text, segment_positions, segment_metadata, original_length = (
-        concatenate_paraphrases_with_positions(prompt, tokenizer)
+    _, full_tokens, segment_positions, original_length = (
+        tokenize_with_segment(prompt, tokenizer, segment_metadata)
     )
+    
+    inputs = {
+        "input_ids": torch.tensor([full_tokens]), 
+        "attention_mask": torch.ones(1, len(full_tokens)), 
+    }
+    inputs = BatchEncoding(data=inputs).to(model.device)
 
-    # Tokenize input
-    inputs = tokenizer(
-        concatenated_text, return_tensors="pt", truncation=True, add_special_tokens=True
-    ).to(model.device)
+    if modify_rope:
+        position_ids = torch.arange(len(full_tokens), dtype=torch.long, device=model.device)
+        context_end = segment_positions[0]['end']
+        start_generation_token_id = context_end + max(segment['end'] - segment['start'] for segment in segment_positions[1:])
+        for segment in segment_positions[1:]:
+            position_ids[segment['start']:segment['end']] = torch.arange(
+                0, segment['end'] - segment['start'], dtype=torch.long, device=model.device
+            ) + position_ids[context_end - 1] + 1
+        position_ids = position_ids.unsqueeze(0).expand_as(inputs["input_ids"]) 
+    else:
+        position_ids = torch.arange(len(full_tokens), dtype=torch.long, device=model.device)
+        position_ids = position_ids.unsqueeze(0).expand_as(inputs["input_ids"]) 
+        start_generation_token_id = original_length
+    
+    # print("Position IDs:", position_ids)
 
     # Create FlexAttention wrapper
     flex_wrapper = FlexAttentionWrapper(model)
 
     generated = None
+    mask_mod = create_myriadlama_mask_mod(
+        segment_positions, segment_metadata, original_length
+    )
 
     # Generation loop
     for step in range(max_new_tokens):
-        current_length = inputs["input_ids"].shape[1]
-
-        # Create mask for MyriadLAMA with complex few-shot paraphrase rules
-        mask_mod = create_myriadlama_mask(
-            segment_positions, segment_metadata, original_length
-        )
-
-        # Patch model with FlexAttention
         flex_wrapper.patch_model(mask_mod)
-
         try:
-            # Forward pass
-            logits = model(inputs["input_ids"]).logits[:, -1, :]
+            logits = model(
+                inputs["input_ids"], 
+                attention_mask=inputs["attention_mask"], 
+                position_ids=position_ids).logits[:, -1, :]
         except Exception as e:
             import traceback
-
             print(f"⚠️  Generation step {step} failed: {type(e).__name__}: {e}")
             print(f"    Traceback:")
             traceback.print_exc()
@@ -883,6 +746,12 @@ def myriadlama_flex_generation(prompt, max_new_tokens=10):
         # Token selection
         next_token = torch.argmax(logits, dim=-1).unsqueeze(1)
         inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token], dim=1)
+        inputs["attention_mask"] = torch.cat(
+            [inputs["attention_mask"], torch.ones(1, 1, device=model.device)], dim=1
+        )
+        
+        new_pos_id = torch.tensor([[start_generation_token_id + step]], device=model.device)
+        position_ids = torch.cat([position_ids, new_pos_id], dim=1)
 
         if generated is None:
             generated = next_token
@@ -891,17 +760,17 @@ def myriadlama_flex_generation(prompt, max_new_tokens=10):
 
         # Debug: show what was generated
         decoded_token = tokenizer.decode(next_token[0], skip_special_tokens=False)
-        print(
-            f"  Step {step}: generated token '{decoded_token}' (id: {next_token.item()})"
-        )
+        # print(
+        #     f"  Step {step}: generated token '{decoded_token}' (id: {next_token.item()})"
+        # )
 
         # Check for EOS or newline (likely end of one-word answer)
         if next_token.item() == tokenizer.eos_token_id:
-            print(f"  Stopped: EOS token")
+            # print(f"  Stopped: EOS token")
             break
         # Also check if we generated a newline or space (end of word)
         if "\n" in decoded_token and step > 0:  # Allow at least one token
-            print(f"  Stopped: newline detected")
+            # print(f"  Stopped: newline detected")
             break
 
     # Decode output
@@ -937,9 +806,20 @@ if __name__ == "__main__":
         help="Normalize predictions and answers to lemmas",
     )
     parser.add_argument(
-        "--num_paraphrases",
+        "--modify_rope",
+        action="store_true",
+        help="Modify RoPE embeddings during generation",
+    )
+    parser.add_argument(
+        "--num_fewshots",
         type=int,
         default=5,
+        help="Number of few-shot examples to use (default: 5)",
+    )
+    parser.add_argument(
+        "--num_paraphrases",
+        type=int,
+        default=2,
         help="Number of paraphrases to use (same for main question and few-shot examples, default: 5)",
     )
     parser.add_argument(
@@ -947,6 +827,11 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Maximum number of samples to generate (default: None, process all)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode with verbose output",
     )
     args = parser.parse_args()
 
@@ -962,7 +847,8 @@ if __name__ == "__main__":
     # Load MyriadLAMA dataset
     from dataset import MyriadLamaDataset
 
-    dataset = MyriadLamaDataset(model_name=args.model)
+    debug = args.debug
+    dataset = MyriadLamaDataset(model_name=args.model, debug=debug)
 
     # Use batch_size=1 for sequential processing
     dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
@@ -975,14 +861,15 @@ if __name__ == "__main__":
 
     model_path = MODEL_PATHs.get(args.model, args.model)
 
-    # Output file setup
-    local_output_dir = f"{DATASET_ROOT}/myriadlama/{args.model}"
-    os.makedirs(local_output_dir, exist_ok=True)
-
     # Determine file name based on number of paraphrases
-    dump_file = (
-        f"{local_output_dir}/myriadlama_flex_{args.num_paraphrases}paras.feather"
-    )
+    if args.modify_rope:
+        dump_file = (
+            f"{dataset.dataset_root}/myriadlama_flex_modifyrope_{args.num_paraphrases}paras.feather"
+        )
+    else:
+        dump_file = (
+            f"{dataset.dataset_root}/myriadlama_flex_{args.num_paraphrases}paras.feather"
+        )
 
     print(f"Output file: {dump_file}")
 
@@ -1040,10 +927,7 @@ if __name__ == "__main__":
 
     # Get few-shot examples with multiple paraphrases (new format)
     # Use same number of paraphrases for few-shot as for main question
-    few_shot_examples = get_few_shot_examples_with_paraphrases(
-        dataset, k=5, num_fs_paraphrases=args.num_paraphrases, seed=42
-    )
-    instruction = dataset.instruction
+    few_shot_examples = dataset.get_few_shot_examples(k=args.num_fewshots)
 
     # Main generation loop
     sample_count = 0
@@ -1051,7 +935,7 @@ if __name__ == "__main__":
         batch_predictions = []
         batch_generations = []
         batch_templates = []
-
+        batch_prompts = []
         # Process each question in batch
         for i, paraphrases in enumerate(zip(*all_paraphrases)):
             # All paraphrases in MyriadLAMA are manually generated
@@ -1059,17 +943,13 @@ if __name__ == "__main__":
             all_templates = list(paraphrases)
             selected_templates = all_templates[: args.num_paraphrases]
 
-            # Construct ONE prompt with ALL question paraphrases (NEW FORMAT)
-            # Prompt has: instruction + few-shot examples + ALL main question paraphrases
-            prompt = construct_prompt_new_format(
-                instruction,
-                few_shot_examples,
-                selected_templates,  # Pass ALL paraphrases, not just one
+            prompt, segment_metadata = dataset.construct_prompts_with_paraphrases(
+                few_shot_examples, paraphrases=selected_templates
             )
-
+            
             # Generate using MyriadLAMA-specific FlexAttention
             generation = myriadlama_flex_generation(
-                prompt, max_new_tokens=10  # Single prompt with all paraphrases
+                prompt, segment_metadata, max_new_tokens=10, modify_rope=args.modify_rope
             )
 
             # Extract prediction (first word only for MyriadLAMA)
@@ -1078,10 +958,12 @@ if __name__ == "__main__":
             batch_predictions.append(prediction)
             batch_generations.append(generation)
             batch_templates.append(selected_templates)
-
+            batch_prompts.append(prompt)
+        
         # Store results
         items = {
             "uuid": uuids,
+            "prompt": batch_prompts,
             "templates": batch_templates,
             "answers": answers,
             "prediction": batch_predictions,

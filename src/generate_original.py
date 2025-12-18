@@ -11,67 +11,12 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from core.constants import MODEL_PATHs
+from utils import init_spacy, lemmaize_chunk, append_lemmas, single_generation
+
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
 nlp = None
 num_parts = 8
-
-def init_spacy():
-    global nlp
-    nlp = spacy.load("en_core_web_lg")
-
-def lemmaize_predicts(predict):
-    global nlp
-    doc = nlp(predict)
-    return [token.lemma_.lower() for token in doc]
-
-def lemmaize_chunk(chunk):
-    predict_lemmas = []
-    answer_lemmas = []
-    for prediction, answers in tqdm(zip(chunk["prediction"], chunk["answers"]), total=len(chunk)):
-        predict_lemmas.append(lemmaize_predicts(prediction))
-        answer_lemmas.append([lemmaize_predicts(ans) for ans in answers])
-    return predict_lemmas, answer_lemmas
-
-def append_lemmas(df, results):
-    all_predict_lemmas = []
-    all_answer_lemmas = []
-    for predict_lemmas, answer_lemmas in results:
-        all_predict_lemmas.extend(predict_lemmas)
-        all_answer_lemmas.extend(answer_lemmas)
-    df["predict_lemma"] = pd.Series(all_predict_lemmas, dtype=object)
-    df["answer_lemmas"] = pd.Series(all_answer_lemmas, dtype=object)
-    return df
-
-def single_generation(prompts, max_new_tokens=20):
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    model.generation_config.temperature = None
-    model.generation_config.top_p = None
-    model.generation_config.pad_token_id = tokenizer.eos_token_id
-
-    inputs = tokenizer(
-        prompts, return_tensors="pt", 
-        padding=True, truncation=True, 
-        padding_side='left', return_attention_mask=True).to(model.device)
-
-    generated = None
-
-    for _ in range(max_new_tokens):
-        with torch.no_grad():
-            logits = model(inputs["input_ids"], attention_mask=inputs["attention_mask"]).logits[:, -1, :]
-            next_token = torch.argmax(logits, dim=-1).unsqueeze(1)
-
-        inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token], dim=1)
-        inputs["attention_mask"] = torch.cat([inputs["attention_mask"], torch.ones_like(next_token)], dim=1)
-
-        if generated is None:
-            generated = next_token
-        else:
-            generated = torch.cat([generated, next_token], dim=1)
-
-    generated_texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
-    new_generated_texts = [gen.strip() for gen in generated_texts]
-    return new_generated_texts
 
 @torch.no_grad()
 def ensemble_generation(prompt_sets, integration_method="max", weights=None):
@@ -163,13 +108,12 @@ if __name__ == "__main__":
     else:
         raise ValueError("Unsupported dataset. Please use 'webqa' or 'myriadlama'.")
 
-        
     dataloader = dataset.get_dataloader(batch_size=8, shuffle=False)
     if args.model not in MODEL_PATHs:
         raise ValueError(f"Model {args.model} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
-    
+
     model_path = MODEL_PATHs.get(args.model, args.model)
-    
+
     if args.method == "origin":
         dump_file = f"{dataset.dataset_root}/origin.feather"
         if os.path.exists(dump_file):
@@ -182,14 +126,14 @@ if __name__ == "__main__":
 
         df = pd.DataFrame(columns=["uuid", "answers", "question", "prompt", "prediction", "generation"])
         few_shot_context = dataset.get_few_shot_examples()
-        
+
         for uuids, answers, all_paraphrases in tqdm(dataloader):
             # Use only the original questions (paraphrase0)
             original_questions = all_paraphrases[0]
             prompts = dataset.construct_prompts(few_shot_context, original_questions)
-            generations = single_generation(prompts)
+            generations = single_generation(model, tokenizer, prompts)
             predictions = [gen.strip().split('\n')[0] for gen in generations]
-            
+
             items = {
                 "uuid": uuids,
                 "answers": answers,
@@ -199,17 +143,17 @@ if __name__ == "__main__":
                 "generation": generations,
             }
             df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
-        
+
         # Lemmaize predictions and answers
         chunks = np.array_split(df, num_parts)
         with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
             results = pool.map(lemmaize_chunk, chunks)
         df = append_lemmas(df, results)
-        
+
         df.to_feather(dump_file)
         print(f"Baseline results saved to {dump_file}")
         exit(0)
-    
+
     if args.method == "per_prompt":
         dump_file = f"{dataset.dataset_root}/per_prompt.feather"
         if os.path.exists(dump_file):
@@ -232,7 +176,7 @@ if __name__ == "__main__":
             for paraphrases in all_paraphrases:
                 paraphrases_in_batch.extend(paraphrases)
                 prompts = dataset.construct_prompts(few_shot_context, paraphrases)
-                generations = single_generation(prompts)
+                generations = single_generation(model, tokenizer, prompts)
                 predictions = [gen.strip().split('\n')[0] for gen in generations]
                 prompts_in_batch.extend(prompts)
                 preds_in_batch.extend(predictions)
@@ -256,7 +200,7 @@ if __name__ == "__main__":
             dump_file = f"{_root}/ensemble_{args.method}-{args.indexs}.feather"
         else:
             dump_file = f"{dataset.dataset_root}/ensemble_{args.method}-{args.num_ensemble}.feather"
-        
+
         print(f"Dump file: {dump_file}")
 
         if args.lemmaize:
@@ -265,7 +209,7 @@ if __name__ == "__main__":
             if "predict_lemma" in df.columns and "answer_lemmas" in df.columns:
                 print(f"Confidence scores already exist in {dump_file}. Use --rewrite to overwrite.")
                 exit(0)
-            
+
             chunks = np.array_split(df, num_parts)
             with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
                 results = pool.map(lemmaize_chunk, chunks)
@@ -318,12 +262,12 @@ if __name__ == "__main__":
                 "generation": generations,
             }
             df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
-        
+
         # Split the DataFrame into chunks for multiprocessing
         chunks = np.array_split(df, num_parts)
         with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
             results = pool.map(lemmaize_chunk, chunks)
         df = append_lemmas(df, results)
-        
+
         # Save the DataFrame to a Feather file
         df.to_feather(dump_file)

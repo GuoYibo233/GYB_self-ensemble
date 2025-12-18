@@ -2,6 +2,7 @@ import os
 from pdb import set_trace
 import random
 import hashlib
+from click import prompt
 import pandas as pd
 from tqdm import tqdm
 from abc import abstractmethod
@@ -12,7 +13,7 @@ from torch.utils.data import DataLoader
 from datasets import load_dataset, load_from_disk, Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from utils import set_seed, DATASET_ROOT
+from utils import PROJECT_DATASET_ROOT, set_seed, DATASET_ROOT
 
 def string_to_id(s):
     return hashlib.md5(s.encode()).hexdigest()
@@ -115,7 +116,7 @@ class ParaPharaseDataset:
 
         if not os.path.exists(self.dataset_root):
             os.makedirs(self.dataset_root, exist_ok=True)
-        
+
         self.ds = self.load_dataset()
 
     @property
@@ -129,7 +130,7 @@ class ParaPharaseDataset:
     @property
     def instruction(self):
         pass
-    
+
     @abstractmethod
     def load_dataset(self):
         pass
@@ -155,6 +156,19 @@ class ParaPharaseDataset:
         prompts = [f"{self.instruction}\n\n{few_shot_examples}\n\nQ: {question}\nA:" for question in questions]
         return prompts
 
+    def construct_prompts_with_paraphrases(self, few_shot_examples, paraphrases):
+        context = f"{self.instruction}\n\n{few_shot_examples}\n\n"
+        paraphrase_qs = [f"Q: {question}\nA:" for question in paraphrases]
+        paraphrases = "".join(paraphrase_qs)
+
+        prompt = f"{context}{paraphrases}"
+        metadata = {
+            "len_context": len(context),
+            "len_paras": [len(question) for question in paraphrase_qs],
+        }
+        return prompt, metadata
+
+
 class WebQADataset(ParaPharaseDataset):
     def __init__(self, model_name, device="auto"):
         self.model_name = model_name
@@ -165,7 +179,7 @@ class WebQADataset(ParaPharaseDataset):
     @property
     def dataset_root(self):
         return os.path.join(DATASET_ROOT, "webqa", self.model_name)
-    
+
     @property
     def dataset_path(self):
         return os.path.join(self.dataset_root, "paraphrases_dataset")
@@ -173,12 +187,12 @@ class WebQADataset(ParaPharaseDataset):
     @property
     def instruction(self):
         return "Answer the question based on general world knowledge. Provide a short and direct answer."
-    
+
     def load_dataset(self):
         if os.path.exists(self.dataset_path):
             print(f"Dataset already exists at {self.dataset_path}. Loading from disk.")
             return load_from_disk(self.dataset_path)
-        
+
         print("Creating WebQA dataset...")
         if self.model_name not in MODEL_PATHs:
             raise ValueError(f"Model {self.model_name} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
@@ -229,36 +243,48 @@ class WebQADataset(ParaPharaseDataset):
         answers = [item["answers"] for item in batch]
         all_prompts = [prompt0, prompt1, prompt2, prompt3, prompt4, prompt5]
         return uuids, answers, all_prompts
-    
+
     def get_few_shot_examples(self, k=5, seed=42):
         if self.train_ds is None:
             self.train_ds = load_dataset("stanfordnlp/web_questions", split="train")
         random.seed(seed)
         indices = random.sample(range(len(self.train_ds)), k)
         return "\n\n".join(self.format_example(self.train_ds[i]) for i in indices)
-    
+
 class MyriadLamaDataset(ParaPharaseDataset):
-    def __init__(self, model_name):
+
+    def __init__(self, model_name, debug=False):
         self.model_name = model_name
-        super().__init__("myriadlama", model_name)
+        self.debug = debug
+        if self.debug:
+            print("Debug mode: using a smaller subset of the dataset.")
+            super().__init__("myriadlama-debug", model_name)
+        else:
+            super().__init__("myriadlama", model_name)
 
     @property
     def dataset_root(self):
-        return os.path.join(DATASET_ROOT, "myriadlama", self.model_name)
-    
+        if self.debug:
+            return os.path.join(
+                PROJECT_DATASET_ROOT, "myriadlama-debug", self.model_name
+            )
+        else:
+            return os.path.join(PROJECT_DATASET_ROOT, "myriadlama", self.model_name)
+
     @property
     def dataset_path(self):
-        return os.path.join(DATASET_ROOT, "myriadlama", "paraphrases_dataset")
-    
+        return os.path.join(self.dataset_root, "paraphrases_dataset")
+
     @property
     def instruction(self):
-        return "Based on the context, predict the [MASK] in the sentence in one word. Do NOT use [MASK] in your answer."
-    
+        return "Based on the context, predict the [MASK] in the sentence in one word."
+        # return "Predict the [MASK] in the sentence in one word."
+
     def load_dataset(self):
         if os.path.exists(self.dataset_path):
             print(f"Dataset already exists at {self.dataset_path}. Loading from disk.")
             return load_from_disk(self.dataset_path)['test']
-        
+
         print("Creating MyriadLAMA dataset...")
         ds = load_dataset("iszhaoxin/MyriadLAMA", split="train")
         df = ds.to_pandas()
@@ -279,10 +305,13 @@ class MyriadLamaDataset(ParaPharaseDataset):
                 "manual_paraphrases": manual_prompts,
                 "auto_paraphrases": auto_prompts
             })
-        
+
         newdf = pd.DataFrame(items)
         ds = Dataset.from_pandas(newdf)
-        ds = ds.train_test_split(test_size=2000, seed=42, shuffle=True)
+        if self.debug:
+            ds = ds.train_test_split(test_size=20, seed=42, shuffle=True)
+        else:
+            ds = ds.train_test_split(test_size=2000, seed=42, shuffle=True)
         ds.save_to_disk(self.dataset_path)
         return ds['test']
 
@@ -303,12 +332,12 @@ class MyriadLamaDataset(ParaPharaseDataset):
     def get_few_shot_examples(self, k=5, seed=42):
         if not os.path.exists(self.dataset_path):
             raise FileNotFoundError(f"Dataset not found at {self.dataset_path}. Please run the dataset preparation first.")
-        
+
         train_ds = load_from_disk(self.dataset_path)['train']
         random.seed(seed)
         indices = random.sample(range(len(train_ds)), k)
         return "\n\n".join(self.format_example(train_ds[i]) for i in indices)
-    
+
     def format_example(self, example):
         question = example["manual_paraphrases"][0]
         answer = example["answers"][0]
