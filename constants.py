@@ -2,13 +2,13 @@ import os
 
 # Set HuggingFace cache to net directory for all models
 # All models will be downloaded/cached to this centralized location
-HF_HOME = "/net/tokyo100-10g/data/str01_01/y-guo/huggingface_cache"
+HF_HOME = "/net/tokyo100-10g/data/str01_01/xzhao/huggingface"
 os.environ["HF_HOME"] = HF_HOME
 os.environ["HUGGINGFACE_HUB_CACHE"] = HF_HOME
 os.environ["TRANSFORMERS_CACHE"] = HF_HOME
 
 # Model paths - All using HuggingFace Hub IDs
-# Models will be downloaded to: /net/tokyo100-10g/data/str01_01/y-guo/huggingface_cache/hub/
+# Models will be downloaded to: /net/tokyo100-10g/data/str01_01/xzhao/huggingface_cache/hub/
 MODEL_PATHs = {
     # LLaMA models - HuggingFace Hub IDs
     "llama3.2_3b_it": "meta-llama/Llama-3.2-3B-Instruct",

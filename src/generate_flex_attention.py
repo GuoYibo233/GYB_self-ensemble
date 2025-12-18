@@ -26,6 +26,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from core.constants import MODEL_PATHs
 from mask_visualization import visualize_mask_heatmap
+from utils import DATASET_ROOT
 
 # Try to import FlexAttention
 try:
@@ -543,7 +544,7 @@ if __name__ == "__main__":
     
     # Reused pattern: Output file setup (from generate.py)
     # Use /net storage for larger datasets
-    local_output_dir = f"/net/tokyo100-10g/data/str01_01/y-guo/datasets/{args.dataset}/{args.model}"
+    local_output_dir = f"{DATASET_ROOT}/{args.dataset}/{args.model}"
     os.makedirs(local_output_dir, exist_ok=True)
     
     if args.indexs is not None:

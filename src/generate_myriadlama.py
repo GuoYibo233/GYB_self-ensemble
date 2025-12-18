@@ -34,6 +34,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from core.constants import MODEL_PATHs
 from mask_visualization import visualize_mask_heatmap
+from utils import DATASET_ROOT
 
 # Try to import FlexAttention
 try:
@@ -909,7 +910,7 @@ if __name__ == "__main__":
     model_path = MODEL_PATHs.get(args.model, args.model)
     
     # Output file setup
-    local_output_dir = f"/net/tokyo100-10g/data/str01_01/y-guo/datasets/myriadlama/{args.model}"
+    local_output_dir = f"{DATASET_ROOT}/myriadlama/{args.model}"
     os.makedirs(local_output_dir, exist_ok=True)
     
     # Determine file name based on number of paraphrases

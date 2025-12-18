@@ -33,6 +33,8 @@ from pathlib import Path
 from datetime import datetime
 import json
 
+from utils import DATASET_ROOT
+
 # Colors for terminal output
 class Colors:
     RED = '\033[0;31m'
@@ -141,7 +143,7 @@ Examples:
     )
     
     parser.add_argument("--dataset-root", type=str,
-                       default="/net/tokyo100-10g/data/str01_01/y-guo/datasets",
+                       default=f"{DATASET_ROOT}",
                        help="Root directory for datasets")
     parser.add_argument("--rewrite", action="store_true",
                        help="Regenerate baselines even if they exist")

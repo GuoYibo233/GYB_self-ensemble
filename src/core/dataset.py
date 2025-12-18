@@ -1,5 +1,4 @@
 import os
-from pdb import set_trace
 import random
 import hashlib
 import pandas as pd
@@ -12,9 +11,8 @@ from torch.utils.data import DataLoader
 from datasets import load_dataset, load_from_disk, Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from utils import set_seed
+from utils import set_seed, DATASET_ROOT
 
-DATATASET_ROOT = "/net/tokyo100-10g/data/str01_01/y-guo/datasets"
 
 
 def string_to_id(s):
@@ -167,7 +165,7 @@ class WebQADataset(ParaPharaseDataset):
 
     @property
     def dataset_root(self):
-        return os.path.join(DATATASET_ROOT, "webqa", self.model_name)
+        return os.path.join(DATASET_ROOT, "webqa", self.model_name)
     
     @property
     def dataset_path(self):
@@ -247,11 +245,11 @@ class MyriadLamaDataset(ParaPharaseDataset):
 
     @property
     def dataset_root(self):
-        return os.path.join(DATATASET_ROOT, "myriadlama", self.model_name)
+        return os.path.join(DATASET_ROOT, "myriadlama", self.model_name)
     
     @property
     def dataset_path(self):
-        return os.path.join(DATATASET_ROOT, "myriadlama", "paraphrases_dataset")
+        return os.path.join(DATASET_ROOT, "myriadlama", "paraphrases_dataset")
     
     @property
     def instruction(self):

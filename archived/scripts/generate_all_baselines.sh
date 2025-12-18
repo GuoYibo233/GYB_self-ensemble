@@ -43,7 +43,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Base directory for datasets
-DATASET_ROOT="/net/tokyo100-10g/data/str01_01/y-guo/datasets"
+DATASET_ROOT="/net/tokyo100-10g/data/str01_01/xzhao/datasets/self-ensemble"
 
 # Script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"

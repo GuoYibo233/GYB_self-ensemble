@@ -5,6 +5,10 @@ import random
 import numpy as np
 from tqdm import tqdm
 
+
+DATASET_ROOT = "/net/tokyo100-10g/data/str01_01/xzhao/datasets/self-ensemble"
+
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)

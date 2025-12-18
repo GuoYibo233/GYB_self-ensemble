@@ -42,6 +42,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.models.llama.modeling_llama import LlamaModel
 
 from constants import MODEL_PATHs
+from utils import DATASET_ROOT
 
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
@@ -672,7 +673,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--output_dir", type=str, default=None,
-        help="Output directory for results (default: /net/tokyo100-10g/data/str01_01/y-guo/datasets/myriadlama/{model})"
+        help=f"Output directory for results (default: {DATASET_ROOT}/myriadlama/{{model}})"
     )
     parser.add_argument(
         "--lemmaize", action="store_true",
@@ -728,7 +729,7 @@ if __name__ == "__main__":
         local_output_dir = args.output_dir
     else:
         # Default output directory (may need to be adjusted for your environment)
-        local_output_dir = f"/net/tokyo100-10g/data/str01_01/y-guo/datasets/myriadlama/{args.model}"
+        local_output_dir = f"{DATASET_ROOT}/myriadlama/{args.model}"
     os.makedirs(local_output_dir, exist_ok=True)
     
     # Determine file name
