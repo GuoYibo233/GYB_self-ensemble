@@ -15,7 +15,6 @@ def init_spacy():
     global nlp
     nlp = spacy.load("en_core_web_lg")
 
-
 def lemmaize_predicts(predict):
     global nlp
     doc = nlp(predict)

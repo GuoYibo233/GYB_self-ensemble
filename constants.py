@@ -10,14 +10,13 @@ os.environ["HUGGINGFACE_HUB_CACHE"] = HF_HOME
 # Models will be downloaded to: /net/tokyo100-10g/data/str01_01/xzhao/huggingface_cache/hub/
 MODEL_PATHs = {
     # LLaMA models - HuggingFace Hub IDs
-    "llama3.2_3b_it": "meta-llama/Llama-3.2-3B-Instruct",
-    "llama3.2_1b_it": "meta-llama/Llama-3.2-1B-Instruct",
+    "llama3.2_3b_it": "/net/tokyo100-10g/data/str01_01/xzhao/models/llama_hf/llama3.2_3b_it",
+    "llama3.2_1b_it": "/net/tokyo100-10g/data/str01_01/xzhao/models/llama_hf/llama3.2_1b_it",
     "llama3.1_8b_it": "/net/tokyo100-10g/data/str01_01/xzhao/models/llama_hf/llama3.1_8b_it",
-    "llama3.2_3b": "meta-llama/Llama-3.2-3B",
-    "llama3.2_1b": "meta-llama/Llama-3.2-1B",
-    "llama3.1_8b": "meta-llama/Llama-3.1-8B",
+    "llama3.2_3b": "/net/tokyo100-10g/data/str01_01/xzhao/models/llama_hf/llama3.2_3b",
+    "llama3.2_1b": "/net/tokyo100-10g/data/str01_01/xzhao/models/llama_hf/llama3.2_1b",
+    "llama3.1_8b": "/net/tokyo100-10g/data/str01_01/xzhao/models/llama_hf/llama3.1_8b",
     "llama3.1_70b": "meta-llama/Llama-3.1-70B",
-    "llama3.2_8b": "meta-llama/Llama-3.2-8B",
     # DeepSeek models - HuggingFace Hub IDs
     "deepseek_r1_distill_llama_8b": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "deepseek_r1_distill_qwen_32b": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",

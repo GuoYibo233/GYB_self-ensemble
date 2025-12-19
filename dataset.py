@@ -1,19 +1,19 @@
-import os
-from pdb import set_trace
-import random
 import hashlib
-from click import prompt
-import pandas as pd
-from tqdm import tqdm
+import os
+import random
 from abc import abstractmethod
+from pdb import set_trace
+
+import pandas as pd
+from click import prompt
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from constants import MODEL_PATHs
+from datasets import Dataset, load_dataset, load_from_disk
+from utils import DATASET_ROOT, PROJECT_DATASET_ROOT, set_seed
 
-from torch.utils.data import DataLoader
-from datasets import load_dataset, load_from_disk, Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
-
-from utils import PROJECT_DATASET_ROOT, set_seed, DATASET_ROOT
 
 def string_to_id(s):
     return hashlib.md5(s.encode()).hexdigest()
@@ -160,13 +160,23 @@ class ParaPharaseDataset:
         context = f"{self.instruction}\n\n{few_shot_examples}\n\n"
         paraphrase_qs = [f"Q: {question}\nA:" for question in paraphrases]
         paraphrases = "".join(paraphrase_qs)
-
-        prompt = f"{context}{paraphrases}"
         metadata = {
             "len_context": len(context),
             "len_paras": [len(question) for question in paraphrase_qs],
         }
-        return prompt, metadata
+        return f"{context}{paraphrases}", metadata
+
+    def construct_prompts_single_para_qapair(self, few_shot_examples, paraphrases):
+        context = f"{self.instruction}\n\n{few_shot_examples}\n\nQ: "
+        paraphrase_qs = [f"{question}\n" for question in paraphrases]
+        paraphrases = "".join(paraphrase_qs)
+        answer = "A:"
+        metadata = {
+            "len_context": len(context),
+            "len_paras": [len(question) for question in paraphrase_qs],
+            "len_answer": len(answer),
+        }
+        return f"{context}{paraphrases}{answer}", metadata
 
 
 class WebQADataset(ParaPharaseDataset):

@@ -27,9 +27,12 @@ for uuids, answers, all_paraphrases in tqdm(dataloader):
         all_templates = list(paraphrases)
         selected_templates = all_templates[: 2]
 
-        prompt, segment_metadata = dataset.construct_prompts_with_paraphrases(
+        prompt, segment_metadata = dataset.construct_prompts_single_para_qapair(
             few_shot_examples, paraphrases=selected_templates
         )
+        # prompt, segment_metadata = dataset.construct_prompts_with_paraphrases(
+        #     few_shot_examples, paraphrases=selected_templates
+        # )
         break
     break
 
@@ -105,7 +108,7 @@ for step in range(10):
     finally:
         # Always unpatch after each step
         flex_wrapper.unpatch_model()
-    
+
     next_token = torch.argmax(logits, dim=-1).unsqueeze(1)
     inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token], dim=1)
 
@@ -130,7 +133,6 @@ for step in range(10):
         break
 
 
-
 # import pandas as pd
 # from tqdm import tqdm
 # from dataset import MyriadLamaDataset
@@ -139,7 +141,6 @@ for step in range(10):
 # dataset = MyriadLamaDataset(model_name="llama3.1_3b_it")
 # dataloader = dataset.get_dataloader(batch_size=8, shuffle=False)
 # few_shot_examples = get_few_shot_examples_with_paraphrases(dataset)
-
 
 
 # from generate_myriadlama import construct_prompt_new_format

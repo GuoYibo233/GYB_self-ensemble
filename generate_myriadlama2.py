@@ -20,23 +20,27 @@ Features:
 - Specifically designed for one-word prediction tasks
 """
 
+import itertools
+import multiprocessing as mp
 import os
+import random
+import warnings
 from pdb import set_trace
+
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-import multiprocessing as mp
-import warnings
-
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, BatchEncoding
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
 
 from constants import MODEL_PATHs
-from utils import DATASET_ROOT, init_spacy, lemmaize_chunk, append_lemmas
+from utils import append_lemmas, init_spacy, lemmaize_chunk
+
+torch.nn.attention.flex_attention._FLEX_ATTENTION_DISABLE_COMPILE_DEBUG = True
 
 # Try to import FlexAttention
 try:
-    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
     from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
     FLEX_ATTENTION_AVAILABLE = True
@@ -60,344 +64,9 @@ num_parts = 8
 # ==============================================================================
 
 
-def get_few_shot_examples_with_paraphrases(dataset, k=5, num_fs_paraphrases=3, seed=42):
-    """
-    Get few-shot examples formatted with multiple paraphrase questions + one answer.
-
-    New format per user requirement:
-    Each few-shot example has:
-    - Multiple paraphrase questions (same count as main question paraphrases)
-    - One answer (shared by all paraphrases)
-
-    Args:
-        dataset: MyriadLamaDataset instance
-        k: Number of few-shot examples
-        num_fs_paraphrases: Number of paraphrase questions per few-shot
-                            (should match main question paraphrase count)
-        seed: Random seed
-
-    Returns:
-        List of few-shot examples, each as:
-        {'paraphrases': [q1, q2, ...], 'answer': ans}
-    """
-    import random
-    from datasets import load_from_disk
-
-    if not os.path.exists(dataset.dataset_path):
-        raise FileNotFoundError(f"Dataset not found at {dataset.dataset_path}")
-
-    train_ds = load_from_disk(dataset.dataset_path)["train"]
-    random.seed(seed)
-    indices = random.sample(range(len(train_ds)), k)
-
-    few_shot_examples = []
-    for idx in indices:
-        example = train_ds[idx]
-        # Get available paraphrases (manual_paraphrases + auto_paraphrases)
-        all_paras = example["manual_paraphrases"] + example.get("auto_paraphrases", [])
-        # Select first num_fs_paraphrases
-        selected_paras = all_paras[: min(num_fs_paraphrases, len(all_paras))]
-        answer = example["answers"][0]
-
-        few_shot_examples.append({"paraphrases": selected_paras, "answer": answer})
-
-    return few_shot_examples
-
-
-def construct_prompt_new_format(instruction, few_shot_examples, question_paraphrases):
-    """
-    Construct a prompt in the new format with ALL question paraphrases.
-
-    Format:
-    {instruction}
-
-    Q: {fs1_para1}
-    Q: {fs1_para2}
-    Q: {fs1_para3}
-    A: {fs1_answer}
-
-    Q: {fs2_para1}
-    Q: {fs2_para2}
-    Q: {fs2_para3}
-    A: {fs2_answer}
-
-    Q: {main_question_paraphrase1}
-    Q: {main_question_paraphrase2}
-    Q: {main_question_paraphrase3}
-    A:
-
-    Args:
-        instruction: Instruction string
-        few_shot_examples: List of {'paraphrases': [...], 'answer': ...}
-        question_paraphrases: List of all main question paraphrase strings
-
-    Returns:
-        Single prompt string
-    """
-    prompt_parts = [instruction]
-
-    # Add few-shot examples
-    for fs_example in few_shot_examples:
-        fs_parts = []
-        # Add all paraphrase questions
-        for para in fs_example["paraphrases"]:
-            fs_parts.append(f"Q: {para}")
-        # Add answer
-        fs_parts.append(f"A: {fs_example['answer']}")
-        prompt_parts.append("\n".join(fs_parts))
-
-    # Add ALL main question paraphrases
-    main_q_parts = []
-    for para in question_paraphrases:
-        main_q_parts.append(f"Q: {para}")
-    main_q_parts.append("A:")
-    prompt_parts.append("\n".join(main_q_parts))
-
-    return "\n\n".join(prompt_parts)
-
-
 # ==============================================================================
 # MODIFIED - MyriadLama-specific paraphrase concatenation with few-shot masking
 # ==============================================================================
-
-
-def parse_prompt_segments_with_metadata_new_format(prompt):
-    """
-    Parse a prompt in the NEW format into segments with metadata.
-
-    NEW MyriadLAMA prompt structure:
-    {instruction}
-
-    Q: {fs1_para1}
-    A: {fs1_answer}
-
-    Q: {fs2_para1}
-    A: {fs2_answer}
-
-    Q: {main_question_para1}
-    Q: {main_question_para2}
-    Q: {main_question_para3}
-    A:
-
-    Returns segments with metadata to enable proper masking:
-    - Each Q paraphrase in a few-shot example is a separate segment
-    - The A in a few-shot example is a separate segment
-    - Each main question paraphrase is a separate segment
-
-    Args:
-        prompt: Single prompt string (with all main question paraphrases)
-
-    Returns:
-        List of tuples: (segment_text, metadata_dict)
-        metadata_dict contains:
-            - 'type': 'instruction', 'few_shot_q', 'few_shot_a', or 'question'
-            - 'paraphrase_idx': which main question paraphrase (for 'question' type)
-            - 'few_shot_idx': which few-shot example (for few_shot type)
-            - 'fs_q_para_idx': which paraphrase within a few-shot (for few_shot_q type)
-    """
-    segments = []
-
-    # Split by double newline to get sections
-    sections = prompt.split("\n\n")
-
-    # First section is instruction
-    if sections[0].strip():
-        segments.append(
-            (
-                sections[0].strip(),
-                {
-                    "type": "instruction",
-                    "paraphrase_idx": None,
-                    "few_shot_idx": None,
-                    "fs_q_para_idx": None,
-                },
-            )
-        )
-
-    # Process remaining sections
-    # Count few-shot examples vs main question
-    few_shot_count = 0
-
-    for section_idx, section in enumerate(sections[1:]):
-        if not section.strip():
-            continue
-
-        lines = section.strip().split("\n")
-
-        # Check if this section ends with "A:" (main question) or "A: {answer}" (few-shot)
-        has_answer_value = any(
-            line.startswith("A:") and len(line) > 2 for line in lines
-        )
-
-        if has_answer_value:
-            # This is a few-shot example with multiple Q paraphrases + one A
-            q_lines = [line for line in lines if line.startswith("Q:")]
-            a_line = [line for line in lines if line.startswith("A:")][0]
-
-            # Add each Q paraphrase as a segment
-            for q_para_idx, q_line in enumerate(q_lines):
-                segments.append(
-                    (
-                        q_line.strip(),
-                        {
-                            "type": "few_shot_q",
-                            "paraphrase_idx": None,  # FS doesn't belong to a main para
-                            "few_shot_idx": few_shot_count,
-                            "fs_q_para_idx": q_para_idx,
-                        },
-                    )
-                )
-
-            # Add the answer as a segment
-            segments.append(
-                (
-                    a_line.strip(),
-                    {
-                        "type": "few_shot_a",
-                        "paraphrase_idx": None,
-                        "few_shot_idx": few_shot_count,
-                        "fs_q_para_idx": None,
-                    },
-                )
-            )
-
-            few_shot_count += 1
-        else:
-            # This is the main question section with MULTIPLE Q paraphrases + A:
-            q_lines = [line for line in lines if line.startswith("Q:")]
-
-            # Add each main question paraphrase as a segment
-            for main_q_para_idx, q_line in enumerate(q_lines):
-                segments.append(
-                    (
-                        q_line.strip(),
-                        {
-                            "type": "question",
-                            "paraphrase_idx": main_q_para_idx,  # Track which main Q para
-                            "few_shot_idx": None,
-                            "fs_q_para_idx": None,
-                        },
-                    )
-                )
-
-    return segments
-
-
-def parse_prompt_segments_with_metadata(prompt, paraphrase_idx):
-    """
-    Parse a prompt into segments with metadata for proper masking.
-
-    A MyriadLAMA prompt has the structure:
-    {instruction}
-
-    {few-shot example 1: Q: ... A: ...}
-
-    {few-shot example 2: Q: ... A: ...}
-    ...
-
-    Q: {question}
-    A:
-
-    Returns segments with metadata to enable proper masking:
-    - Paraphrases of same few-shot example cannot attend to each other
-    - Paraphrases from different few-shot can attend to each other
-    - Answer parts have normal causal mask
-    - Question paraphrases are isolated
-
-    Args:
-        prompt: Single prompt string
-        paraphrase_idx: Which paraphrase this prompt represents (0, 1, 2, ...)
-
-    Returns:
-        List of tuples: (segment_text, metadata_dict)
-        metadata_dict contains:
-            - 'type': 'instruction', 'few_shot_q', 'few_shot_a', or 'question'
-            - 'paraphrase_idx': which paraphrase this belongs to
-            - 'few_shot_idx': which few-shot example (for few_shot type)
-    """
-    segments = []
-
-    # Split by Q: to find all Q-A pairs
-    parts = prompt.split("Q: ")
-
-    # First part is the instruction (before any Q:)
-    if parts[0].strip():
-        segments.append(
-            (
-                parts[0].strip(),
-                {
-                    "type": "instruction",
-                    "paraphrase_idx": paraphrase_idx,
-                    "few_shot_idx": None,
-                },
-            )
-        )
-
-    # Process Q-A pairs
-    few_shot_count = 0
-    for i, part in enumerate(parts[1:]):
-        # Each part starts after "Q: " and may contain "A: "
-        if "A:" in part:
-            # This is a Q-A pair (few-shot example or the question with answer prompt)
-            # Split by "A:" to separate question and answer
-            q_and_a = part.split("A:", 1)
-            question_text = q_and_a[0].strip()
-            answer_text = q_and_a[1].strip() if len(q_and_a) > 1 else ""
-
-            # Check if this is a few-shot example (has non-empty answer) or the final question
-            is_few_shot = (i < len(parts[1:]) - 1) or (
-                answer_text and answer_text != ""
-            )
-
-            if is_few_shot:
-                # This is a few-shot example - split into question and answer segments
-                segments.append(
-                    (
-                        f"Q: {question_text}".strip(),
-                        {
-                            "type": "few_shot_q",
-                            "paraphrase_idx": paraphrase_idx,
-                            "few_shot_idx": few_shot_count,
-                        },
-                    )
-                )
-                segments.append(
-                    (
-                        f"A: {answer_text}".strip(),
-                        {
-                            "type": "few_shot_a",
-                            "paraphrase_idx": paraphrase_idx,
-                            "few_shot_idx": few_shot_count,
-                        },
-                    )
-                )
-                few_shot_count += 1
-            else:
-                # This is the actual question (final Q with empty A:)
-                segments.append(
-                    (
-                        f"Q: {question_text}\nA:".strip(),
-                        {
-                            "type": "question",
-                            "paraphrase_idx": paraphrase_idx,
-                            "few_shot_idx": None,
-                        },
-                    )
-                )
-        else:
-            # Just a question without "A:" (shouldn't happen in normal prompts)
-            segments.append(
-                (
-                    f"Q: {part}".strip(),
-                    {
-                        "type": "question",
-                        "paraphrase_idx": paraphrase_idx,
-                        "few_shot_idx": None,
-                    },
-                )
-            )
-
-    return segments
 
 # concatenate_paraphrases_with_positions
 def tokenize_with_segment(prompt, tokenizer, segment_metadata):
@@ -407,6 +76,7 @@ def tokenize_with_segment(prompt, tokenizer, segment_metadata):
         prompt[segment_metadata["len_context"] + sum(segment_metadata["len_paras"][:i]): 
                segment_metadata["len_context"] + sum(segment_metadata["len_paras"][:i+1])] 
         for i in range(len(segment_metadata["len_paras"]))]
+
     full_tokens = tokenizer.encode(context)
     segment_positions.append({"start": 0, "end": len(full_tokens), "type": "context"})
     for p in paraphrases:
@@ -415,17 +85,31 @@ def tokenize_with_segment(prompt, tokenizer, segment_metadata):
         end = start + len(p_tokens)
         segment_positions.append({"start": start, "end": end, "type": "paraphrase"})
         full_tokens.extend(p_tokens)
-    
+
+    seq_length_for_flexattn_scoremod = len(full_tokens)
+    if "len_answer" in segment_metadata:
+        answer_start = segment_metadata["len_context"] + sum(
+            segment_metadata["len_paras"]
+        )
+        answer_end = answer_start + segment_metadata["len_answer"]
+        ans_tokens = tokenizer.encode(prompt[answer_start:answer_end])[1:]
+        segment_positions.append(
+            {
+                "start": len(full_tokens),
+                "end": len(full_tokens) + len(ans_tokens),
+                "type": "answer",
+            }
+        )
+        full_tokens.extend(ans_tokens)
     # Decode back to text
     concatenated_text = tokenizer.decode(full_tokens, skip_special_tokens=False)
 
-    return concatenated_text, full_tokens, segment_positions, len(full_tokens)
-
-
-# ==============================================================================
-# MODIFIED - MyriadLama-specific mask creation
-# ==============================================================================
-
+    return (
+        concatenated_text,
+        full_tokens,
+        segment_positions,
+        seq_length_for_flexattn_scoremod,
+    )
 
 def create_myriadlama_mask_mod(segment_positions, segment_metadata, original_length):
     """
@@ -549,7 +233,7 @@ class FlexAttentionWrapper:
 
             # Extract position embeddings
             cos, sin = position_embeddings
-            
+
             # Compute Q, K, V projections
             query_states = original_attn.q_proj(hidden_states)
             key_states = original_attn.k_proj(hidden_states)
@@ -599,13 +283,9 @@ class FlexAttentionWrapper:
                     query_states, key_states, value_states, block_mask=block_mask
                 )
             except Exception as e:
-                # Fallback to standard SDPA
-                import traceback
-
                 print(
                     f"⚠️  FlexAttention failed in layer {layer_idx}: {type(e).__name__}: {e}"
                 )
-                print(f"    Falling back to standard attention")
                 attn_output = torch.nn.functional.scaled_dot_product_attention(
                     query_states, key_states, value_states, is_causal=True
                 )
@@ -687,12 +367,12 @@ def myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10, modi
         start = segment_metadata["len_context"] + sum(segment_metadata["len_paras"][:i])
         end = start + length
         paraphrases.append(prompt[start:end])
-    
+
     # Process prompt with position tracking and metadata
-    _, full_tokens, segment_positions, original_length = (
+    concatnate_text, full_tokens, segment_positions, attn_mod_len = (
         tokenize_with_segment(prompt, tokenizer, segment_metadata)
     )
-    
+
     inputs = {
         "input_ids": torch.tensor([full_tokens]), 
         "attention_mask": torch.ones(1, len(full_tokens)), 
@@ -700,32 +380,53 @@ def myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10, modi
     inputs = BatchEncoding(data=inputs).to(model.device)
 
     if modify_rope:
+        # The segmented position should follows the order of `context`, `paraphrases`, `answer`
         position_ids = torch.arange(len(full_tokens), dtype=torch.long, device=model.device)
         context_end = segment_positions[0]['end']
-        start_generation_token_id = context_end + max(segment['end'] - segment['start'] for segment in segment_positions[1:])
+        start_generation_token_id = context_end + max(
+            segment["end"] - segment["start"]
+            for segment in segment_positions[1:]
+            if segment["type"] == "paraphrase"
+        )
         for segment in segment_positions[1:]:
+            if segment["type"] != "paraphrase":
+                continue
             position_ids[segment['start']:segment['end']] = torch.arange(
                 0, segment['end'] - segment['start'], dtype=torch.long, device=model.device
             ) + position_ids[context_end - 1] + 1
+
+        if segment_metadata.get("len_answer", 0) > 0:
+            answer_segment = segment_positions[-1]
+            start_generation_token_id += answer_segment["end"] - answer_segment["start"]
+            position_ids[answer_segment["start"] : answer_segment["end"]] = (
+                torch.arange(
+                    0,
+                    answer_segment["end"] - answer_segment["start"],
+                    dtype=torch.long,
+                    device=model.device,
+                )
+                + position_ids[: answer_segment["start"]].max()
+                + 1
+            )
         position_ids = position_ids.unsqueeze(0).expand_as(inputs["input_ids"]) 
     else:
         position_ids = torch.arange(len(full_tokens), dtype=torch.long, device=model.device)
         position_ids = position_ids.unsqueeze(0).expand_as(inputs["input_ids"]) 
-        start_generation_token_id = original_length
-    
-    # print("Position IDs:", position_ids)
+        start_generation_token_id = len(full_tokens)
 
+    # set_trace()
     # Create FlexAttention wrapper
-    flex_wrapper = FlexAttentionWrapper(model)
-
-    generated = None
-    mask_mod = create_myriadlama_mask_mod(
-        segment_positions, segment_metadata, original_length
-    )
+    if args.modify_attn:
+        flex_wrapper = FlexAttentionWrapper(model)
+        mask_mod = create_myriadlama_mask_mod(
+            segment_positions, segment_metadata, attn_mod_len
+        )
 
     # Generation loop
+    generated = None
     for step in range(max_new_tokens):
-        flex_wrapper.patch_model(mask_mod)
+        if args.modify_attn:
+            flex_wrapper.patch_model(mask_mod)
         try:
             logits = model(
                 inputs["input_ids"], 
@@ -734,22 +435,20 @@ def myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10, modi
         except Exception as e:
             import traceback
             print(f"⚠️  Generation step {step} failed: {type(e).__name__}: {e}")
-            print(f"    Traceback:")
             traceback.print_exc()
-            print(f"    Falling back to unpatched model...")
             flex_wrapper.unpatch_model()
             logits = model(inputs["input_ids"]).logits[:, -1, :]
         finally:
             # Always unpatch after each step
-            flex_wrapper.unpatch_model()
-
+            if args.modify_attn:
+                flex_wrapper.unpatch_model()
         # Token selection
         next_token = torch.argmax(logits, dim=-1).unsqueeze(1)
         inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token], dim=1)
         inputs["attention_mask"] = torch.cat(
             [inputs["attention_mask"], torch.ones(1, 1, device=model.device)], dim=1
         )
-        
+
         new_pos_id = torch.tensor([[start_generation_token_id + step]], device=model.device)
         position_ids = torch.cat([position_ids, new_pos_id], dim=1)
 
@@ -811,6 +510,17 @@ if __name__ == "__main__":
         help="Modify RoPE embeddings during generation",
     )
     parser.add_argument(
+        "--modify_attn",
+        action="store_true",
+        help="Modify attention masks using FlexAttention",
+    )
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=5,
+        help="Number of samples to generate for testing (default: 5)",
+    )
+    parser.add_argument(
         "--num_fewshots",
         type=int,
         default=5,
@@ -823,15 +533,37 @@ if __name__ == "__main__":
         help="Number of paraphrases to use (same for main question and few-shot examples, default: 5)",
     )
     parser.add_argument(
+        "--single_para_qapair",
+        action="store_true",
+        help="Use only one Q&A section for the target paraphrase",
+    )
+    parser.add_argument(
         "--max_samples",
         type=int,
         default=None,
         help="Maximum number of samples to generate (default: None, process all)",
     )
     parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=1,
+        help="Batch size for generation (default: 1)",
+    )
+    parser.add_argument(
+        "--repeat_paras",
+        action="store_true",
+        help="Repeating the same paraphrase multiple times",
+    )
+
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug mode with verbose output",
+    )
+    parser.add_argument(
+        "--rewrite",
+        action="store_true",
+        help="Rewrite existing output file",
     )
     args = parser.parse_args()
 
@@ -849,8 +581,6 @@ if __name__ == "__main__":
 
     debug = args.debug
     dataset = MyriadLamaDataset(model_name=args.model, debug=debug)
-
-    # Use batch_size=1 for sequential processing
     dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
 
     if args.model not in MODEL_PATHs:
@@ -862,14 +592,17 @@ if __name__ == "__main__":
     model_path = MODEL_PATHs.get(args.model, args.model)
 
     # Determine file name based on number of paraphrases
+    dump_file = f"{dataset.dataset_root}/myriadlama."
+    if args.modify_attn:
+        dump_file += "modifyattn."
     if args.modify_rope:
-        dump_file = (
-            f"{dataset.dataset_root}/myriadlama_flex_modifyrope_{args.num_paraphrases}paras.feather"
-        )
-    else:
-        dump_file = (
-            f"{dataset.dataset_root}/myriadlama_flex_{args.num_paraphrases}paras.feather"
-        )
+        dump_file += "modifyrope."
+    if args.repeat_paras:
+        dump_file += "repeatparas."
+    if args.single_para_qapair:
+        dump_file += "singleparaqapair."
+
+    dump_file += f"{args.num_samples}samples.{args.num_paraphrases}paras.feather"
 
     print(f"Output file: {dump_file}")
 
@@ -890,15 +623,9 @@ if __name__ == "__main__":
 
         df = append_lemmas(df, results)
         df.to_feather(dump_file)
-
-        # Convert to CSV automatically
-        csv_file = dump_file.replace(".feather", ".csv")
-        df.to_csv(csv_file, index=False)
-        print(f"✅ CSV file saved to {csv_file}")
-
         exit(0)
 
-    if os.path.exists(dump_file):
+    if os.path.exists(dump_file) and not args.rewrite:
         print(f"File {dump_file} already exists, skipping generation.")
         exit(0)
 
@@ -909,19 +636,9 @@ if __name__ == "__main__":
     )
     tokenizer.pad_token = tokenizer.eos_token
 
-    # Print model info
-    print(f"🔍 Model: {args.model}")
-    print(f"   PyTorch version: {torch.__version__}")
-    print(f"   Using MyriadLAMA-specific FlexAttention")
-    print(f"   Using {args.num_paraphrases} paraphrases per question")
-    if hasattr(model.config, "num_attention_heads"):
-        print(f"   Attention heads: {model.config.num_attention_heads}")
-
-    # DataFrame initialization
     df = pd.DataFrame(
         columns=["uuid", "answers", "prediction", "generation", "templates"]
     )
-    print(f"\nMyriadLAMA FlexAttention generation")
     if args.max_samples:
         print(f"Processing maximum {args.max_samples} samples")
 
@@ -929,41 +646,68 @@ if __name__ == "__main__":
     # Use same number of paraphrases for few-shot as for main question
     few_shot_examples = dataset.get_few_shot_examples(k=args.num_fewshots)
 
-    # Main generation loop
     sample_count = 0
+    samples = []
     for uuids, answers, all_paraphrases in tqdm(dataloader):
+        # Process each question in batch
+        assert len(uuids) == 1, "Batch size must be 1 for MyriadLAMA generation"
+        uuid, answer = uuids[0], answers[0]
+        all_paraphrases = list(zip(*all_paraphrases))[0]
+        all_indices = list(range(len(all_paraphrases)))
+        if args.repeat_paras:
+            all_sampled_paras = list([[n] * args.num_paraphrases for n in all_indices])
+        else:
+            all_sampled_paras = itertools.permutations(
+                all_indices, args.num_paraphrases
+            )
+
+        random.seed(uuids[0])
+        for paraids in random.sample(list(all_sampled_paras), k=args.num_samples):
+            sampled_paraphrases = [all_paraphrases[i] for i in paraids]
+            samples.append((uuid, answer, sampled_paraphrases))
+
+    print(f"Total samples to generate: {len(samples)}")
+    sample_dataloader = torch.utils.data.DataLoader(
+        samples,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=lambda x: x,
+        num_workers=0,
+    )
+
+    for batch in tqdm(sample_dataloader):
+        uuids, answers, sampled_paraphrases = zip(*batch)
         batch_predictions = []
         batch_generations = []
         batch_templates = []
         batch_prompts = []
-        # Process each question in batch
-        for i, paraphrases in enumerate(zip(*all_paraphrases)):
-            # All paraphrases in MyriadLAMA are manually generated
-            # Simply select the first N paraphrases
-            all_templates = list(paraphrases)
-            selected_templates = all_templates[: args.num_paraphrases]
 
+        if not args.single_para_qapair:
             prompt, segment_metadata = dataset.construct_prompts_with_paraphrases(
-                few_shot_examples, paraphrases=selected_templates
+                few_shot_examples, paraphrases=sampled_paraphrases[0]
             )
-            
-            # Generate using MyriadLAMA-specific FlexAttention
-            generation = myriadlama_flex_generation(
-                prompt, segment_metadata, max_new_tokens=10, modify_rope=args.modify_rope
+        else:
+            prompt, segment_metadata = dataset.construct_prompts_single_para_qapair(
+                few_shot_examples, paraphrases=sampled_paraphrases[0]
             )
+        # Generate using MyriadLAMA-specific FlexAttention
+        generation = myriadlama_flex_generation(
+            prompt, segment_metadata, max_new_tokens=10, modify_rope=args.modify_rope
+        )
 
-            # Extract prediction (first word only for MyriadLAMA)
-            prediction = generation.strip().split()[0] if generation.strip() else ""
+        # Extract prediction (first word only for MyriadLAMA)
+        prediction = generation.strip().split()[0] if generation.strip() else ""
 
-            batch_predictions.append(prediction)
-            batch_generations.append(generation)
-            batch_templates.append(selected_templates)
-            batch_prompts.append(prompt)
-        
+        batch_predictions.append(prediction)
+        batch_generations.append(generation)
+        batch_templates.append(sampled_paraphrases)
+        batch_prompts.append(prompt)
+
         # Store results
         items = {
             "uuid": uuids,
             "prompt": batch_prompts,
+            "paraphrases": sampled_paraphrases,
             "templates": batch_templates,
             "answers": answers,
             "prediction": batch_predictions,
@@ -980,10 +724,13 @@ if __name__ == "__main__":
             break
 
     # Save results
+
+    chunks = np.array_split(df, num_parts)
+    with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
+        results = pool.map(lemmaize_chunk, chunks)
+
+    df = append_lemmas(df, results)
+    df["answer_lemmas"] = df["answer_lemmas"].apply(lambda xs: [list(x) for x in xs])
+    df["predict_lemma"] = df["predict_lemma"].apply(lambda xs: xs[0])
     df.to_feather(dump_file)
     print(f"✅ Results saved to {dump_file}")
-
-    # Convert to CSV automatically
-    csv_file = dump_file.replace(".feather", ".csv")
-    df.to_csv(csv_file, index=False)
-    print(f"✅ CSV file saved to {csv_file}")
