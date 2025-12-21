@@ -30,15 +30,16 @@ Attention Pattern (visualized):
     ...
 """
 
+import multiprocessing as mp
 import os
-import spacy
+import warnings
+
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-import multiprocessing as mp
-import warnings
+import spacy
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.models.llama.modeling_llama import LlamaModel
 
 from constants import MODEL_PATHs
@@ -114,6 +115,7 @@ def get_few_shot_examples_with_paraphrases(dataset, k=5, num_fs_paraphrases=3, s
         {'paraphrases': [q1, q2, ...], 'answer': ans}
     """
     import random
+
     from datasets import load_from_disk
     
     if not os.path.exists(dataset.dataset_path):
@@ -271,6 +273,8 @@ def tokenize_prompt_parts(prompt_parts, tokenizer, add_special_tokens=True):
 # ==============================================================================
 
 from pdb import set_trace
+
+
 def build_question_struct_mask(question_group_ids, Q, K, dtype, device):
     """
     Build the per-query structure mask [1, 1, Q, K].
@@ -856,13 +860,13 @@ if __name__ == "__main__":
     if args.device == "auto":
         print("📦 Loading model with device_map='auto'")
         model = AutoModelForCausalLM.from_pretrained(
-            model_path, device_map="auto", torch_dtype="auto"
+            model_path, device_map="auto", dtype="auto"
         )
     else:
         target_device = args.device
         print(f"📦 Loading full model onto single device: {target_device}")
         model = AutoModelForCausalLM.from_pretrained(
-            model_path, torch_dtype="auto"
+            model_path, dtype="auto"
         )
         try:
             model.to(target_device)

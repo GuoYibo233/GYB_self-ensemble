@@ -1,17 +1,17 @@
-from pdb import set_trace
+import multiprocessing as mp
 import os
-import spacy
+import warnings
+from pdb import set_trace
+
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-import multiprocessing as mp
-import warnings
-
+import spacy
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from constants import MODEL_PATHs
-from utils import init_spacy, lemmaize_chunk, append_lemmas, single_generation
+from utils import append_lemmas, init_spacy, lemmaize_chunk, single_generation
 
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
@@ -187,7 +187,7 @@ if __name__ == "__main__":
 
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         model = AutoModelForCausalLM.from_pretrained(
-            model_path, device_map=args.device, torch_dtype="auto"
+            model_path, device_map=args.device, dtype="auto"
         )
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -238,7 +238,7 @@ if __name__ == "__main__":
 
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         model = AutoModelForCausalLM.from_pretrained(
-            model_path, device_map=args.device, torch_dtype="auto"
+            model_path, device_map=args.device, dtype="auto"
         )
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -308,7 +308,7 @@ if __name__ == "__main__":
 
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         model = AutoModelForCausalLM.from_pretrained(
-            model_path, device_map=args.device, torch_dtype="auto"
+            model_path, device_map=args.device, dtype="auto"
         )
         tokenizer.pad_token = tokenizer.eos_token
 

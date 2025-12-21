@@ -32,44 +32,26 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
+from zmq import has
 
-from constants import MODEL_PATHs
-from utils import append_lemmas, init_spacy, lemmaize_chunk
+torch.set_printoptions(profile="full", linewidth=200)
+
+from constants import MODEL_PATHs  # noqa: E402
+from utils import append_lemmas, init_spacy, lemmaize_chunk  # noqa: E402
 
 torch.nn.attention.flex_attention._FLEX_ATTENTION_DISABLE_COMPILE_DEBUG = True
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
-# Try to import FlexAttention
-try:
-    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-    from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
-
-    FLEX_ATTENTION_AVAILABLE = True
-    print("✅ FlexAttention is available")
-except ImportError:
-    FLEX_ATTENTION_AVAILABLE = False
-    print(
-        "⚠️  FlexAttention not available. This script requires PyTorch 2.5+ or nightly."
-    )
-    print(
-        "    Install with: pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121"
-    )
-
+FLEX_ATTENTION_AVAILABLE = True
+print("✅ FlexAttention is available")
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
 nlp = None
 num_parts = 8
 
-# ==============================================================================
-# NEW - Helper functions for new prompt format
-# ==============================================================================
-
-
-# ==============================================================================
-# MODIFIED - MyriadLama-specific paraphrase concatenation with few-shot masking
-# ==============================================================================
-
 # concatenate_paraphrases_with_positions
-def tokenize_with_segment(prompt, tokenizer, segment_metadata):
+def tokenize_with_segment(prompt, tokenizer, segment_metadata, has_bos=True):
     segment_positions = []
     context = prompt[: segment_metadata["len_context"]]
     paraphrases = [
@@ -80,7 +62,10 @@ def tokenize_with_segment(prompt, tokenizer, segment_metadata):
     full_tokens = tokenizer.encode(context)
     segment_positions.append({"start": 0, "end": len(full_tokens), "type": "context"})
     for p in paraphrases:
-        p_tokens = tokenizer.encode(p)[1:]  # Exclude BOS and EOS
+        p_tokens = tokenizer.encode(p)
+        if has_bos:
+            p_tokens = p_tokens[1:]  # Exclude BOS for llama tokenizers
+
         start = len(full_tokens)
         end = start + len(p_tokens)
         segment_positions.append({"start": start, "end": end, "type": "paraphrase"})
@@ -92,7 +77,9 @@ def tokenize_with_segment(prompt, tokenizer, segment_metadata):
             segment_metadata["len_paras"]
         )
         answer_end = answer_start + segment_metadata["len_answer"]
-        ans_tokens = tokenizer.encode(prompt[answer_start:answer_end])[1:]
+        ans_tokens = tokenizer.encode(prompt[answer_start:answer_end])
+        if has_bos:
+            ans_tokens = ans_tokens[1:]  # Exclude BOS for llama tokenizers
         segment_positions.append(
             {
                 "start": len(full_tokens),
@@ -111,7 +98,7 @@ def tokenize_with_segment(prompt, tokenizer, segment_metadata):
         seq_length_for_flexattn_scoremod,
     )
 
-def create_myriadlama_mask_mod(segment_positions, segment_metadata, original_length):
+def create_myriadlama_mask_mod(segment_positions, prefix_len):
     """
     Create attention mask for MyriadLAMA with complex few-shot and paraphrase masking.
 
@@ -132,17 +119,17 @@ def create_myriadlama_mask_mod(segment_positions, segment_metadata, original_len
     Args:
         segment_positions: List of (start, end) tuples defining all segment boundaries
         segment_metadata: List of dicts with 'type', 'paraphrase_idx', 'few_shot_idx'
-        original_length: Length of the original concatenated sequence
+        prefix_len: Length of the context sequence
 
     Returns:
         mask_mod: Function (b, h, q_idx, kv_idx) -> Tensor[bool]
     """
     # Convert segment positions to tensors
     segment_starts = torch.tensor(
-        [position["start"] for position in segment_positions], dtype=torch.int64
+        [segment["start"] for segment in segment_positions], dtype=torch.int64
     )
     segment_ends = torch.tensor(
-        [position["end"] for position in segment_positions], dtype=torch.int64
+        [segment["end"] for segment in segment_positions], dtype=torch.int64
     )
     
     def mask_mod(b, h, q_idx, kv_idx):
@@ -154,7 +141,7 @@ def create_myriadlama_mask_mod(segment_positions, segment_metadata, original_len
 
         Logic (PRIORITY ORDER):
         1. HIGHEST PRIORITY: Causal constraint (cannot attend to future)
-        2. Generated tokens (>= original_length) attend to all previous tokens
+        2. Generated tokens (>= prefix_len) attend to all previous tokens
         3. Within encoding phase, apply complex rules based on segment types
         """        
         # Move segment tensors to same device as indices
@@ -166,7 +153,7 @@ def create_myriadlama_mask_mod(segment_positions, segment_metadata, original_len
         causal_mask = q_idx >= kv_idx
 
         # 2) If query is in generation phase, allow attention to all previous tokens (with causal)
-        is_generated = q_idx >= original_length
+        is_generated = q_idx >= prefix_len
 
         # 3) Find which segment the query and key belong to
         q_in_segment = (q_idx >= seg_starts) & (q_idx < seg_ends)
@@ -191,10 +178,45 @@ def create_myriadlama_mask_mod(segment_positions, segment_metadata, original_len
     return mask_mod
 
 
-# ==============================================================================
-# REUSED FROM flex_attention_generate.py - Attention wrapper
-# ==============================================================================
+def create_myriadlama_score_mod(
+    segment_positions,
+    prefix_len: int,
+    scaling_factor: float,
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
+):
+    # Collect paraphrase spans
+    para_spans = [
+        (seg["start"], seg["end"])
+        for seg in segment_positions
+        if seg.get("type") == "paraphrase"
+    ]
+    assert len(para_spans) > 0, "No paraphrase spans found in segment_positions"
+    
+    # scaling_factor = 2
+    weight = 1 + scaling_factor/len(para_spans)
+    # Build a boolean mask over *prefix positions* [0, prefix_len)
+    # True where kv is inside a paraphrase span (restricted to prefix)
+    para_mask = torch.zeros(prefix_len, device=device, dtype=torch.bool)
+    for start, end in para_spans:
+        s = max(0, min(prefix_len, int(start)))
+        e = max(0, min(prefix_len, int(end)))
+        if e > s:
+            para_mask[s:e] = True
 
+    # Precompute constants once
+    logw = torch.tensor(float(torch.log(torch.tensor(weight))), device=device, dtype=dtype)
+    zero = torch.tensor(0.0, device=device, dtype=dtype)
+
+    def score_mod(score, b, h, q_idx, kv_idx):
+        is_decode = q_idx >= prefix_len
+        is_prefix_key = kv_idx < prefix_len
+        kv_safe = torch.clamp(kv_idx, 0, prefix_len - 1)
+        in_para = para_mask[kv_safe] & is_prefix_key  # safe + correct
+        apply = is_decode & in_para
+        return score + torch.where(apply, logw.to(score.dtype), zero.to(score.dtype))
+
+    return score_mod
 
 class FlexAttentionWrapper:
     """
@@ -207,6 +229,7 @@ class FlexAttentionWrapper:
         self.original_forwards = {}
         self.is_patched = False
         self.current_mask_mod = None
+        self.current_score_mod = None
 
     def create_patched_forward(self, layer_idx, original_attn):
         """Create a patched forward function for an attention layer."""
@@ -221,7 +244,7 @@ class FlexAttentionWrapper:
         ):
             # If no custom mask or sequence is too short, use original
             bsz, q_len, _ = hidden_states.size()
-            if self.current_mask_mod is None or q_len == 1:
+            if (self.current_mask_mod is None and self.current_score_mod is None) or q_len == 1:
                 return self.original_forwards[layer_idx](
                     hidden_states,
                     position_embeddings,
@@ -270,18 +293,19 @@ class FlexAttentionWrapper:
 
             # Create block mask and use FlexAttention
             try:
-                block_mask = create_block_mask(
-                    self.current_mask_mod,
-                    B=bsz,
-                    H=num_heads,
-                    Q_LEN=q_len,
-                    KV_LEN=q_len,
-                    device=query_states.device,
-                )
+                if self.current_mask_mod is None:
+                    block_mask = None
+                else:
+                    block_mask = create_block_mask(
+                        self.current_mask_mod,
+                        B=bsz,
+                        H=num_heads,
+                        Q_LEN=q_len,
+                        KV_LEN=q_len,
+                        device=query_states.device,
+                    )
 
-                attn_output = flex_attention(
-                    query_states, key_states, value_states, block_mask=block_mask
-                )
+                attn_output = flex_attention(query_states, key_states, value_states, block_mask=block_mask, score_mod=self.current_score_mod)
             except Exception as e:
                 print(
                     f"⚠️  FlexAttention failed in layer {layer_idx}: {type(e).__name__}: {e}"
@@ -301,12 +325,13 @@ class FlexAttentionWrapper:
 
         return patched_forward
 
-    def patch_model(self, mask_mod):
+    def patch_model(self, mask_mod, score_mod):
         """Patch all attention layers with FlexAttention."""
         if self.is_patched:
             self.unpatch_model()
 
         self.current_mask_mod = mask_mod
+        self.current_score_mod = score_mod
 
         for i, layer in enumerate(self.model.model.layers):
             attn = layer.self_attn
@@ -326,6 +351,7 @@ class FlexAttentionWrapper:
 
         self.original_forwards = {}
         self.current_mask_mod = None
+        self.current_score_mod = None
         self.is_patched = False
 
 
@@ -335,7 +361,7 @@ class FlexAttentionWrapper:
 
 
 @torch.no_grad()
-def myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10, modify_rope=False):
+def myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10, modify_rope=False, has_bos=True):
     """
     Generate text using FlexAttention for MyriadLAMA.
 
@@ -370,7 +396,7 @@ def myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10, modi
 
     # Process prompt with position tracking and metadata
     concatnate_text, full_tokens, segment_positions, attn_mod_len = (
-        tokenize_with_segment(prompt, tokenizer, segment_metadata)
+        tokenize_with_segment(prompt, tokenizer, segment_metadata, has_bos=has_bos)
     )
 
     inputs = {
@@ -414,19 +440,26 @@ def myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10, modi
         position_ids = position_ids.unsqueeze(0).expand_as(inputs["input_ids"]) 
         start_generation_token_id = len(full_tokens)
 
-    # set_trace()
     # Create FlexAttention wrapper
-    if args.modify_attn:
+    if args.modify_attn or args.scale_factor > 0:
         flex_wrapper = FlexAttentionWrapper(model)
+
+    if args.modify_attn:
         mask_mod = create_myriadlama_mask_mod(
-            segment_positions, segment_metadata, attn_mod_len
+            segment_positions, attn_mod_len
+        )
+    if args.scale_factor > 0:
+        score_mod = create_myriadlama_score_mod(
+            segment_positions, attn_mod_len, 
+            scaling_factor=args.scale_factor,
+            device=model.device, dtype=model.dtype
         )
 
     # Generation loop
     generated = None
     for step in range(max_new_tokens):
-        if args.modify_attn:
-            flex_wrapper.patch_model(mask_mod)
+        if args.modify_attn or args.scale_factor > 0:
+            flex_wrapper.patch_model(mask_mod if args.modify_attn else None, score_mod if args.scale_factor > 0 else None)
         try:
             logits = model(
                 inputs["input_ids"], 
@@ -515,6 +548,12 @@ if __name__ == "__main__":
         help="Modify attention masks using FlexAttention",
     )
     parser.add_argument(
+        "--scale_factor",
+        type=float,
+        default=0.0,
+        help="Scale attention scores using FlexAttention (default: 0.0, no scaling)",
+    )
+    parser.add_argument(
         "--num_samples",
         type=int,
         default=5,
@@ -599,6 +638,8 @@ if __name__ == "__main__":
         dump_file += "modifyrope."
     if args.repeat_paras:
         dump_file += "repeatparas."
+    if args.scale_factor > 0:
+        dump_file += f"scalescore{str(int(args.scale_factor*10))}."
     if args.single_para_qapair:
         dump_file += "singleparaqapair."
 
@@ -632,9 +673,10 @@ if __name__ == "__main__":
     # Model loading
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map=args.device, torch_dtype="auto"
+        model_path, device_map=args.device, dtype="auto"
     )
     tokenizer.pad_token = tokenizer.eos_token
+    has_bos = "llama" in args.model.lower()
 
     df = pd.DataFrame(
         columns=["uuid", "answers", "prediction", "generation", "templates"]
@@ -692,7 +734,7 @@ if __name__ == "__main__":
             )
         # Generate using MyriadLAMA-specific FlexAttention
         generation = myriadlama_flex_generation(
-            prompt, segment_metadata, max_new_tokens=10, modify_rope=args.modify_rope
+            prompt, segment_metadata, max_new_tokens=10, modify_rope=args.modify_rope, has_bos=has_bos
         )
 
         # Extract prediction (first word only for MyriadLAMA)
@@ -715,22 +757,21 @@ if __name__ == "__main__":
         }
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
 
-        # Check if we've reached max_samples
         sample_count += len(uuids)
         if args.max_samples and sample_count >= args.max_samples:
-            print(
-                f"Reached max_samples limit ({args.max_samples}), stopping generation"
-            )
+            print(f"Reached max_samples limit ({args.max_samples}), stopping generation")
             break
-
-    # Save results
 
     chunks = np.array_split(df, num_parts)
     with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
         results = pool.map(lemmaize_chunk, chunks)
 
-    df = append_lemmas(df, results)
-    df["answer_lemmas"] = df["answer_lemmas"].apply(lambda xs: [list(x) for x in xs])
-    df["predict_lemma"] = df["predict_lemma"].apply(lambda xs: xs[0])
-    df.to_feather(dump_file)
-    print(f"✅ Results saved to {dump_file}")
+    try:
+        df = append_lemmas(df, results)
+        df["answer_lemmas"] = df["answer_lemmas"].apply(lambda xs: [list(x) for x in xs])
+        df["predict_lemma"] = df["predict_lemma"].apply(lambda xs: xs[0])
+    except Exception as e:
+        print(f"❌ Lemmatization failed: {type(e).__name__}: {e}")
+    finally:
+        df.to_feather(dump_file)
+        print(f"✅ Results saved to {dump_file}")

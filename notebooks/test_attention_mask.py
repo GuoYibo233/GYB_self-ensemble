@@ -1,16 +1,19 @@
-from bdb import set_trace
-import pandas as pd
+from pdb import set_trace
+
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from dataset import MyriadLamaDataset
 
-dataset = MyriadLamaDataset(model_name="llama3.2_3b_it")
+# dataset = MyriadLamaDataset(model_name="llama3.2_3b_it")
+dataset = MyriadLamaDataset(model_name="qwen2.5_7b_it")
 dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
-from transformers import AutoTokenizer, AutoModelForCausalLM
 
-model_path = "/net/tokyo100-10g/data/str01_01/xzhao/models/llama_hf/llama3.2_3b_it"
+# model_path = "/net/tokyo100-10g/data/str01_01/xzhao/models/llama_hf/llama3.2_3b_it"
+model_path = "Qwen/Qwen2.5-7B-Instruct"
 tokenizer = AutoTokenizer.from_pretrained(model_path)
 model = AutoModelForCausalLM.from_pretrained(
-    model_path, device_map="cuda:0", torch_dtype="auto"
+    model_path, device_map="cuda:0", dtype="auto"
 )
 few_shot_examples = dataset.get_few_shot_examples(k=1)
 
@@ -37,12 +40,15 @@ for uuids, answers, all_paraphrases in tqdm(dataloader):
     break
 
 
-# generation = myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10)
 import torch
 from transformers import BatchEncoding
-from generate_myriadlama2 import FlexAttentionWrapper
-from generate_myriadlama2 import tokenize_with_segment
-from generate_myriadlama2 import create_myriadlama_mask_mod
+
+from generate_myriadlama2 import (
+    FlexAttentionWrapper,
+    create_myriadlama_mask_mod,
+    create_myriadlama_score_mod,
+    tokenize_with_segment,
+)
 
 tokenizer.pad_token_id = tokenizer.eos_token_id
 model.generation_config.temperature = None
@@ -56,9 +62,7 @@ for i, length in enumerate(segment_metadata["len_paras"]):
     paraphrases.append(prompt[start:end])
 
 # Process prompt with position tracking and metadata
-concatenated_text, full_tokens, segment_positions, original_length = (
-    tokenize_with_segment(prompt, tokenizer, segment_metadata)
-)
+concatenated_text, full_tokens, segment_positions, attn_mod_len = tokenize_with_segment(prompt, tokenizer, segment_metadata, has_bos=False)
 
 inputs = {
     "input_ids": torch.tensor([full_tokens]), 
@@ -68,19 +72,42 @@ inputs = BatchEncoding(data=inputs).to(model.device)
 
 modify_rope = False
 if modify_rope:
+    # The segmented position should follows the order of `context`, `paraphrases`, `answer`
     position_ids = torch.arange(len(full_tokens), dtype=torch.long, device=model.device)
     context_end = segment_positions[0]['end']
-    start_generation_token_id = context_end + max(segment['end'] - segment['start'] for segment in segment_positions[1:])
+    start_generation_token_id = context_end + max(
+        segment["end"] - segment["start"]
+        for segment in segment_positions[1:]
+        if segment["type"] == "paraphrase"
+    )
     for segment in segment_positions[1:]:
+        if segment["type"] != "paraphrase":
+            continue
         position_ids[segment['start']:segment['end']] = torch.arange(
             0, segment['end'] - segment['start'], dtype=torch.long, device=model.device
         ) + position_ids[context_end - 1] + 1
 
+    if segment_metadata.get("len_answer", 0) > 0:
+        answer_segment = segment_positions[-1]
+        start_generation_token_id += answer_segment["end"] - answer_segment["start"]
+        position_ids[answer_segment["start"] : answer_segment["end"]] = (
+            torch.arange(
+                0,
+                answer_segment["end"] - answer_segment["start"],
+                dtype=torch.long,
+                device=model.device,
+            )
+            + position_ids[: answer_segment["start"]].max()
+            + 1
+        )
     position_ids = position_ids.unsqueeze(0).expand_as(inputs["input_ids"]) 
 else:
-    position_ids = torch.ones(len(full_tokens), dtype=torch.long, device=model.device)
+    position_ids = torch.arange(len(full_tokens), dtype=torch.long, device=model.device)
     position_ids = position_ids.unsqueeze(0).expand_as(inputs["input_ids"]) 
-    start_generation_token_id = original_length
+    start_generation_token_id = len(full_tokens)
+
+
+set_trace()
 
 inputs = BatchEncoding(data=inputs).to(model.device)
 flex_wrapper = FlexAttentionWrapper(model)
@@ -88,21 +115,21 @@ flex_wrapper = FlexAttentionWrapper(model)
 print(concatenated_text)
 
 generated = None
-mask_mod = create_myriadlama_mask_mod(
-    segment_positions, segment_metadata, original_length
+score_mod = None
+mask_mod = create_myriadlama_mask_mod(segment_positions, attn_mod_len)
+score_mod = create_myriadlama_score_mod(
+    segment_positions, attn_mod_len, device=model.device, dtype=model.dtype
 )
 
 # Generation loop
 for step in range(10):
-    flex_wrapper.patch_model(mask_mod)
+    flex_wrapper.patch_model(mask_mod, score_mod)
     try:
         logits = model(inputs["input_ids"], attention_mask=inputs["attention_mask"], position_ids=position_ids).logits[:, -1, :]
     except Exception as e:
         import traceback
         print(f"⚠️  Generation step {step} failed: {type(e).__name__}: {e}")
-        print(f"    Traceback:")
         traceback.print_exc()
-        print(f"    Falling back to unpatched model...")
         flex_wrapper.unpatch_model()
         logits = model(inputs["input_ids"]).logits[:, -1, :]
     finally:
@@ -111,6 +138,12 @@ for step in range(10):
 
     next_token = torch.argmax(logits, dim=-1).unsqueeze(1)
     inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token], dim=1)
+    inputs["attention_mask"] = torch.cat(
+        [inputs["attention_mask"], torch.ones(1, 1, device=model.device)], dim=1
+    )
+
+    new_pos_id = torch.tensor([[start_generation_token_id + step]], device=model.device)
+    position_ids = torch.cat([position_ids, new_pos_id], dim=1)
 
     if generated is None:
         generated = next_token
@@ -119,18 +152,6 @@ for step in range(10):
 
     # Debug: show what was generated
     decoded_token = tokenizer.decode(next_token[0], skip_special_tokens=False)
-    print(
-        f"  Step {step}: generated token '{decoded_token}' (id: {next_token.item()})"
-    )
-
-    # Check for EOS or newline (likely end of one-word answer)
-    if next_token.item() == tokenizer.eos_token_id:
-        print(f"  Stopped: EOS token")
-        break
-    # Also check if we generated a newline or space (end of word)
-    if "\n" in decoded_token and step > 0:  # Allow at least one token
-        print(f"  Stopped: newline detected")
-        break
 
 
 # import pandas as pd
@@ -186,7 +207,7 @@ for step in range(10):
 # from generate_myriadlama import FlexAttentionWrapper
 
 # model = AutoModelForCausalLM.from_pretrained(
-#     model_path, device_map="cuda:0", torch_dtype="auto"
+#     model_path, device_map="cuda:0", dtype="auto"
 # )
 # flex_wrapper = FlexAttentionWrapper(model)
 # flex_wrapper.patch_model(mask_mod)

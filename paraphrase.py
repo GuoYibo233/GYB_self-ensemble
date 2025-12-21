@@ -1,8 +1,10 @@
-from tqdm import tqdm
-from utils import set_seed
-from datasets import load_dataset
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from datasets import load_dataset
+from utils import set_seed
+
 
 def paraphrase_webqa_collate_fn(batch):
     questions = [item["question"] for item in batch]
@@ -96,8 +98,9 @@ def generate_paraphrases(prompts, idx, seed=42):
     return new_generated_texts
 
 if __name__ == "__main__":
-    import os
     import argparse
+    import os
+
     from constants import MODEL_PATHs
 
     parser = argparse.ArgumentParser(description="Generate confidence scores for paraphrases.")
@@ -128,7 +131,7 @@ if __name__ == "__main__":
     
         model_path = MODEL_PATHs.get(args.model, args.model)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
-        model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, torch_dtype="auto")
+        model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, dtype="auto")
         tokenizer.pad_token = tokenizer.eos_token
 
         test_ds = load_dataset("stanfordnlp/web_questions", split="test")
@@ -174,6 +177,7 @@ if __name__ == "__main__":
             })
         
         import pandas as pd
+
         from datasets import Dataset
         newdf = pd.DataFrame(items)
         newdf = newdf.sample(1000, random_state=42)

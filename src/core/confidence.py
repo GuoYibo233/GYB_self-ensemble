@@ -1,12 +1,12 @@
+import multiprocessing as mp
 import os
 from pdb import set_trace
-import spacy
+
 import numpy as np
 import pandas as pd
+import spacy
 from tqdm import tqdm
-import multiprocessing as mp
-
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from utils import greedy_generation, is_matched_str, multinormal_generation
 
@@ -60,6 +60,7 @@ def append_lemmas(df, results):
 
 if __name__ == "__main__":
     import argparse
+
     from constants import MODEL_PATHs
 
     parser = argparse.ArgumentParser(description="Generate confidence scores for paraphrases.")
@@ -109,7 +110,7 @@ if __name__ == "__main__":
         raise ValueError(f"Model {args.model} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
     model_path = MODEL_PATHs.get(args.model, args.model)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, torch_dtype="auto")
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, dtype="auto")
     tokenizer.pad_token = tokenizer.eos_token
 
     # Do sampling and generation

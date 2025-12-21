@@ -12,17 +12,17 @@ Key features:
 - Reuses functions and patterns from generate.py where possible
 """
 
-from pdb import set_trace
+import multiprocessing as mp
 import os
-import spacy
+import warnings
+from pdb import set_trace
+
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-import multiprocessing as mp
-import warnings
-
+import spacy
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from core.constants import MODEL_PATHs
 from mask_visualization import visualize_mask_heatmap
@@ -30,7 +30,7 @@ from utils import DATASET_ROOT
 
 # Try to import FlexAttention
 try:
-    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
     from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
     FLEX_ATTENTION_AVAILABLE = True
     print("✅ FlexAttention is available")
@@ -581,7 +581,7 @@ if __name__ == "__main__":
     # Reused pattern: Model loading (from generate.py)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map=args.device, torch_dtype="auto"
+        model_path, device_map=args.device, dtype="auto"
     )
     tokenizer.pad_token = tokenizer.eos_token
     

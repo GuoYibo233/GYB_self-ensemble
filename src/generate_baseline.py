@@ -17,18 +17,18 @@ Usage:
     python baseline_generate.py --method per_prompt --dataset webqa --model llama3.2_3b_it
 """
 
-import os
-import spacy
-import numpy as np
-import pandas as pd
-from tqdm import tqdm
 import multiprocessing as mp
+import os
 import warnings
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import numpy as np
+import pandas as pd
+import spacy
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from core.constants import MODEL_PATHs
-from utils import init_spacy, lemmaize_chunk, append_lemmas, single_generation
+from utils import append_lemmas, init_spacy, lemmaize_chunk, single_generation
 
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
@@ -86,7 +86,7 @@ def generate_baseline_origin(dataset, dataloader, model_path, args):
 
     global tokenizer, model
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, torch_dtype="auto")
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, dtype="auto")
     tokenizer.pad_token = tokenizer.eos_token
 
     df = pd.DataFrame(columns=["uuid", "answers", "question", "prompt", "prediction", "generation"])
@@ -146,7 +146,7 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
 
     global tokenizer, model
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, torch_dtype="auto")
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, dtype="auto")
     tokenizer.pad_token = tokenizer.eos_token
 
     df = pd.DataFrame(columns=["uuid", "answers", "paraphrase", "prompt", "prediction", "generation"])

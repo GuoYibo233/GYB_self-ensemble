@@ -22,10 +22,12 @@ MODEL_PATHs = {
     "deepseek_r1_distill_qwen_32b": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
     "deepseek_r1_distill_qwen_14b": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
     # Qwen models - HuggingFace Hub IDs
+    "qwen2.5_3b": "Qwen/Qwen2.5-3B",
     "qwen2.5_7b": "Qwen/Qwen2.5-7B",
     "qwen2.5_14b": "Qwen/Qwen2.5-14B",
-    "qwen2.5_7b_it": "Qwen/Qwen2.5-7B-Instruct",
     "qwen2.5_3b_it": "Qwen/Qwen2.5-3B-Instruct",
+    "qwen2.5_7b_it": "Qwen/Qwen2.5-7B-Instruct",
+    "qwen2.5_14b_it": "Qwen/Qwen2.5-14B-Instruct",
     "qwen3_1.7b": "Qwen/Qwen3-1.7B",
     "qwen3_4b": "Qwen/Qwen3-4B",
     "qwen3_8b": "Qwen/Qwen3-8B",

@@ -20,17 +20,17 @@ Features:
 - Specifically designed for one-word prediction tasks
 """
 
-from pdb import set_trace
+import multiprocessing as mp
 import os
-import spacy
+import warnings
+from pdb import set_trace
+
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-import multiprocessing as mp
-import warnings
-
+import spacy
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from core.constants import MODEL_PATHs
 from mask_visualization import visualize_mask_heatmap
@@ -38,7 +38,7 @@ from utils import DATASET_ROOT
 
 # Try to import FlexAttention
 try:
-    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
     from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
     FLEX_ATTENTION_AVAILABLE = True
     print("✅ FlexAttention is available")
@@ -112,6 +112,7 @@ def get_few_shot_examples_with_paraphrases(dataset, k=5, num_fs_paraphrases=3, s
         {'paraphrases': [q1, q2, ...], 'answer': ans}
     """
     import random
+
     from datasets import load_from_disk
     
     if not os.path.exists(dataset.dataset_path):
@@ -949,7 +950,7 @@ if __name__ == "__main__":
     # Model loading
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map=args.device, torch_dtype="auto"
+        model_path, device_map=args.device, dtype="auto"
     )
     tokenizer.pad_token = tokenizer.eos_token
     

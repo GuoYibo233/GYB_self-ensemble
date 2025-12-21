@@ -1,18 +1,16 @@
+import hashlib
 import os
 import random
-import hashlib
-import pandas as pd
-from tqdm import tqdm
 from abc import abstractmethod
 
-from constants import MODEL_PATHs
-
+import pandas as pd
 from torch.utils.data import DataLoader
-from datasets import load_dataset, load_from_disk, Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from utils import set_seed, DATASET_ROOT
-
+from constants import MODEL_PATHs
+from datasets import Dataset, load_dataset, load_from_disk
+from utils import DATASET_ROOT, set_seed
 
 
 def string_to_id(s):
@@ -187,7 +185,7 @@ class WebQADataset(ParaPharaseDataset):
         model_path = MODEL_PATHs.get(self.model_name)
         print(f"Loading model from {model_path}")
         tokenizer = AutoTokenizer.from_pretrained(model_path)
-        model = AutoModelForCausalLM.from_pretrained(model_path, device_map=self.device, torch_dtype="auto")
+        model = AutoModelForCausalLM.from_pretrained(model_path, device_map=self.device, dtype="auto")
         tokenizer.pad_token = tokenizer.eos_token
 
         test_ds = load_dataset("stanfordnlp/web_questions", split="test")

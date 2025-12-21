@@ -210,7 +210,7 @@ class WebQADataset(ParaPharaseDataset):
         model_path = MODEL_PATHs.get(self.model_name)
         print(f"Loading model from {model_path}")
         tokenizer = AutoTokenizer.from_pretrained(model_path)
-        model = AutoModelForCausalLM.from_pretrained(model_path, device_map=self.device, torch_dtype="auto")
+        model = AutoModelForCausalLM.from_pretrained(model_path, device_map=self.device, dtype="auto")
         tokenizer.pad_token = tokenizer.eos_token
 
         test_ds = load_dataset("stanfordnlp/web_questions", split="test")
@@ -319,7 +319,7 @@ class MyriadLamaDataset(ParaPharaseDataset):
         newdf = pd.DataFrame(items)
         ds = Dataset.from_pandas(newdf)
         if self.debug:
-            ds = ds.train_test_split(test_size=20, seed=42, shuffle=True)
+            ds = ds.train_test_split(test_size=200, seed=42, shuffle=True)
         else:
             ds = ds.train_test_split(test_size=2000, seed=42, shuffle=True)
         ds.save_to_disk(self.dataset_path)

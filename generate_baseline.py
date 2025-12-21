@@ -17,18 +17,18 @@ Usage:
     python baseline_generate.py --method per_prompt --dataset webqa --model llama3.2_3b_it
 """
 
-from pdb import set_trace
+import multiprocessing as mp
 import os
+import warnings
+from pdb import set_trace
+
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import multiprocessing as mp
-import warnings
-
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from constants import MODEL_PATHs
-from utils import single_generation, append_lemmas, init_spacy, lemmaize_chunk
+from utils import append_lemmas, init_spacy, lemmaize_chunk, single_generation
 
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
@@ -61,7 +61,7 @@ def generate_baseline_origin(dataset, dataloader, model_path, args):
     global tokenizer, model
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map=args.device, torch_dtype="auto"
+        model_path, device_map=args.device, dtype="auto"
     )
     tokenizer.pad_token = tokenizer.eos_token
 
@@ -126,7 +126,7 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
     global tokenizer, model
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map=args.device, torch_dtype="auto"
+        model_path, device_map=args.device, dtype="auto"
     )
     tokenizer.pad_token = tokenizer.eos_token
 
@@ -241,7 +241,6 @@ if __name__ == "__main__":
     # Load dataset
     if args.dataset == "webqa":
         from dataset import WebQADataset
-
         dataset = WebQADataset(model_name=args.model)
     elif args.dataset == "myriadlama":
         from dataset import MyriadLamaDataset
