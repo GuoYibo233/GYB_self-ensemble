@@ -1,10 +1,12 @@
+import random
 import re
 import string
-import spacy
-import torch
-import random 
+from pdb import set_trace
+
 import numpy as np
 import pandas as pd
+import spacy
+import torch
 from tqdm import tqdm
 
 DATASET_ROOT = "/net/tokyo100-10g/data/str01_01/xzhao/datasets/self-ensemble"
@@ -192,6 +194,17 @@ def single_generation(model, tokenizer, prompts, max_new_tokens=20):
     new_generated_texts = [gen.strip() for gen in generated_texts]
     return new_generated_texts
 
+def take_until_punct_or_space(tokens: list[str]) -> list[str]:
+    """
+    Return the prefix of tokens until the next token is
+    punctuation or whitespace.
+    """
+    result = []
+    for tok in tokens:
+        if tok.isspace() or tok in string.punctuation:
+            break
+        result.append(tok)
+    return result
 
 def is_matched_str(pred_tokens, gold_tokens, birdirectional=True):
     if any(" ".join(gold_tokens) == " ".join(pred_tokens[i:i+len(gold_tokens)]) for i in range(len(pred_tokens))):
@@ -206,6 +219,22 @@ def partial_match(pred, golds, birdirectional=True):
 def partial_match_scores(predictions, gold_answers, birdirect=False):
     scores = []
     for prediction, _gold_answers in zip(predictions, gold_answers):
-        score = partial_match(prediction, _gold_answers, birdirect)
+        try:
+            prediction = prediction.tolist()
+        except Exception:
+            assert isinstance(prediction, str)
+            prediction = [prediction]
+
+        _gold_answers = [gold.tolist() for gold in _gold_answers]
+        score = partial_match(prediction, _gold_answers, birdirect)        
+        scores.append(int(score))
+    return sum(scores)/len(scores)
+
+def partial_match_scores_use_generation(predictions, gold_answers, birdirect=False):
+    scores = []
+    for generations, _gold_answers in zip(predictions, gold_answers):
+        generations = take_until_punct_or_space(generations[0])
+        _gold_answers = [gold.tolist() for gold in _gold_answers]
+        score = partial_match(generations, _gold_answers, birdirect)
         scores.append(int(score))
     return sum(scores)/len(scores)

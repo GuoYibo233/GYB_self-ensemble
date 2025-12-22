@@ -32,7 +32,6 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
-from zmq import has
 
 torch.set_printoptions(profile="full", linewidth=200)
 
@@ -44,7 +43,6 @@ from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
 FLEX_ATTENTION_AVAILABLE = True
-print("✅ FlexAttention is available")
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
 nlp = None
@@ -577,6 +575,11 @@ if __name__ == "__main__":
         help="Use only one Q&A section for the target paraphrase",
     )
     parser.add_argument(
+        "--explicit_prompts",
+        action="store_true",
+        help="Use explicit prompt construction without few-shot examples and Q&A pairs",
+    )
+    parser.add_argument(
         "--max_samples",
         type=int,
         default=None,
@@ -606,6 +609,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    assert int(args.explicit_prompts) + int(args.single_para_qapair) <= 1, \
+        "Cannot use both --explicit_prompts and --single_para_qapair together."
+    
     # Check FlexAttention availability
     if not FLEX_ATTENTION_AVAILABLE:
         print("❌ FlexAttention is required for this script.")
@@ -620,8 +626,6 @@ if __name__ == "__main__":
 
     debug = args.debug
     dataset = MyriadLamaDataset(model_name=args.model, debug=debug)
-    dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
-
     if args.model not in MODEL_PATHs:
         raise ValueError(
             f"Model {args.model} not supported. "
@@ -642,39 +646,23 @@ if __name__ == "__main__":
         dump_file += f"scalescore{str(int(args.scale_factor*10))}."
     if args.single_para_qapair:
         dump_file += "singleparaqapair."
+    if args.explicit_prompts:
+        dump_file += "explicitprompts."
+    if args.num_fewshots != 5:
+        dump_file += f"{args.num_fewshots}fshots."
 
     dump_file += f"{args.num_samples}samples.{args.num_paraphrases}paras.feather"
 
-    print(f"Output file: {dump_file}")
-
     # Lemmatization mode
-    if args.lemmaize:
-        assert os.path.exists(
-            dump_file
-        ), f"File {dump_file} does not exist. Run without --lemmaize first."
-
-        df = pd.read_feather(dump_file)
-        if "predict_lemma" in df.columns and "answer_lemmas" in df.columns:
-            print(f"Lemmatized data already exists in {dump_file}")
-            exit(0)
-
-        chunks = np.array_split(df, num_parts)
-        with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
-            results = pool.map(lemmaize_chunk, chunks)
-
-        df = append_lemmas(df, results)
-        df.to_feather(dump_file)
-        exit(0)
-
+    dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
     if os.path.exists(dump_file) and not args.rewrite:
-        print(f"File {dump_file} already exists, skipping generation.")
+        print(f"✅ File {dump_file} already exists, skipping generation.")
         exit(0)
-
+    
+    print(f"🔄 Starting generation to {dump_file}")
     # Model loading
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map=args.device, dtype="auto"
-    )
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, dtype="auto")
     tokenizer.pad_token = tokenizer.eos_token
     has_bos = "llama" in args.model.lower()
 
@@ -686,7 +674,7 @@ if __name__ == "__main__":
 
     # Get few-shot examples with multiple paraphrases (new format)
     # Use same number of paraphrases for few-shot as for main question
-    few_shot_examples = dataset.get_few_shot_examples(k=args.num_fewshots)
+    few_shot_examples = dataset.get_few_shot_examples(k=args.num_fewshots) if args.num_fewshots > 0 else ""
 
     sample_count = 0
     samples = []
@@ -724,14 +712,18 @@ if __name__ == "__main__":
         batch_templates = []
         batch_prompts = []
 
-        if not args.single_para_qapair:
-            prompt, segment_metadata = dataset.construct_prompts_with_paraphrases(
-                few_shot_examples, paraphrases=sampled_paraphrases[0]
-            )
+        if args.explicit_prompts:
+            prompt, segment_metadata = dataset.construct_explicit_prompts(paraphrases=sampled_paraphrases[0])
         else:
-            prompt, segment_metadata = dataset.construct_prompts_single_para_qapair(
-                few_shot_examples, paraphrases=sampled_paraphrases[0]
-            )
+            if args.single_para_qapair:
+                prompt, segment_metadata = dataset.construct_prompts_single_para_qapair(
+                    few_shot_examples, paraphrases=sampled_paraphrases[0]
+                )
+            else:
+                prompt, segment_metadata = dataset.construct_prompts_with_paraphrases(
+                    few_shot_examples, paraphrases=sampled_paraphrases[0]
+                )
+                
         # Generate using MyriadLAMA-specific FlexAttention
         generation = myriadlama_flex_generation(
             prompt, segment_metadata, max_new_tokens=10, modify_rope=args.modify_rope, has_bos=has_bos
@@ -744,8 +736,6 @@ if __name__ == "__main__":
         batch_generations.append(generation)
         batch_templates.append(sampled_paraphrases)
         batch_prompts.append(prompt)
-
-        # Store results
         items = {
             "uuid": uuids,
             "prompt": batch_prompts,

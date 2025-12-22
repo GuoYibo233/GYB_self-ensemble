@@ -5,8 +5,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from dataset import MyriadLamaDataset
 
-# dataset = MyriadLamaDataset(model_name="llama3.2_3b_it")
-dataset = MyriadLamaDataset(model_name="qwen2.5_7b_it")
+dataset = MyriadLamaDataset(model_name="llama3.2_3b_it")
+# dataset = MyriadLamaDataset(model_name="qwen2.5_7b_it")
 dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
 
 # model_path = "/net/tokyo100-10g/data/str01_01/xzhao/models/llama_hf/llama3.2_3b_it"
@@ -30,9 +30,11 @@ for uuids, answers, all_paraphrases in tqdm(dataloader):
         all_templates = list(paraphrases)
         selected_templates = all_templates[: 2]
 
-        prompt, segment_metadata = dataset.construct_prompts_single_para_qapair(
-            few_shot_examples, paraphrases=selected_templates
-        )
+        prompt, segment_metadata = dataset.construct_explicit_prompts(paraphrases=selected_templates)
+
+        # prompt, segment_metadata = dataset.construct_prompts_single_para_qapair(
+        #     few_shot_examples, paraphrases=selected_templates
+        # )
         # prompt, segment_metadata = dataset.construct_prompts_with_paraphrases(
         #     few_shot_examples, paraphrases=selected_templates
         # )
@@ -70,7 +72,7 @@ inputs = {
 }
 inputs = BatchEncoding(data=inputs).to(model.device)
 
-modify_rope = False
+modify_rope = True
 if modify_rope:
     # The segmented position should follows the order of `context`, `paraphrases`, `answer`
     position_ids = torch.arange(len(full_tokens), dtype=torch.long, device=model.device)
@@ -105,7 +107,6 @@ else:
     position_ids = torch.arange(len(full_tokens), dtype=torch.long, device=model.device)
     position_ids = position_ids.unsqueeze(0).expand_as(inputs["input_ids"]) 
     start_generation_token_id = len(full_tokens)
-
 
 set_trace()
 
