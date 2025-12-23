@@ -25,25 +25,32 @@ def lemmaize_predicts(predict):
 
 def lemmaize_chunk(chunk):
     predict_lemmas = []
+    generation_lemmas = []
     answer_lemmas = []
-    for prediction, answers in tqdm(
-        zip(chunk["prediction"], chunk["answers"]), total=len(chunk)
-    ):
+
+    for idx, row in chunk.iterrows():
+        prediction = row["prediction"]
+        generation = row["generation"]
+        answers = row["answers"]
+        generation = str(generation).strip().split(".")[0] if "." in str(generation) else str(generation)
         predict_lemmas.append(lemmaize_predicts(prediction))
         answer_lemmas.append([lemmaize_predicts(ans) for ans in answers])
-    return predict_lemmas, answer_lemmas
+        generation_lemmas.append(lemmaize_predicts(generation))
+    return predict_lemmas, generation_lemmas, answer_lemmas
 
 
 def append_lemmas(df, results):
     all_predict_lemmas = []
+    all_generation_lemmas = []
     all_answer_lemmas = []
-    for predict_lemmas, answer_lemmas in results:
+    for predict_lemmas, generation_lemmas, answer_lemmas in results:
         all_predict_lemmas.extend(predict_lemmas)
+        all_generation_lemmas.extend(generation_lemmas)
         all_answer_lemmas.extend(answer_lemmas)
     df["predict_lemma"] = pd.Series(all_predict_lemmas, dtype=object)
+    df["generation_lemmas"] = pd.Series(all_generation_lemmas, dtype=object)
     df["answer_lemmas"] = pd.Series(all_answer_lemmas, dtype=object)
     return df
-
 
 def set_seed(seed):
     random.seed(seed)
@@ -155,7 +162,7 @@ def normalize_answer(s):
         return ""
 
 
-def single_generation(model, tokenizer, prompts, max_new_tokens=20):
+def single_generation(model, tokenizer, prompts, max_new_tokens=10):
     """Generate responses using greedy decoding."""
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model.generation_config.temperature = None
@@ -225,7 +232,10 @@ def partial_match_scores(predictions, gold_answers, birdirect=False):
             assert isinstance(prediction, str)
             prediction = [prediction]
 
-        _gold_answers = [gold.tolist() for gold in _gold_answers]
+        if len(prediction) == 0:
+            scores.append(0)
+            continue
+        
         score = partial_match(prediction, _gold_answers, birdirect)        
         scores.append(int(score))
     return sum(scores)/len(scores)
@@ -234,7 +244,9 @@ def partial_match_scores_use_generation(predictions, gold_answers, birdirect=Fal
     scores = []
     for generations, _gold_answers in zip(predictions, gold_answers):
         generations = take_until_punct_or_space(generations[0])
-        _gold_answers = [gold.tolist() for gold in _gold_answers]
+        if len(generations) == 0:
+            scores.append(0)
+            continue
         score = partial_match(generations, _gold_answers, birdirect)
         scores.append(int(score))
     return sum(scores)/len(scores)

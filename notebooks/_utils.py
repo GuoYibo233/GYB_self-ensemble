@@ -34,15 +34,19 @@ def get_filenames(
     return dump_file
 
 def _calculate_accuracy(df, label, use_generation=False):
-    answers = [answers for answers in df["answer_lemmas"]]
-    if use_generation:
-        generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]
-        acc = partial_match_scores_use_generation(generations, answers, birdirect=True)
-    else:
-        predicts = [preds for preds in df["predict_lemma"]]
-        acc = partial_match_scores(predicts, answers, birdirect=True)
+    # answers = [answers for answers in df["answer_lemmas"]]
+    answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
+    try:
+        if use_generation:
+            generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]
+            acc = partial_match_scores_use_generation(generations, answers, birdirect=True)
+        else:
+            predicts = df["predict_lemma"].tolist()
+            acc = partial_match_scores(predicts, answers, birdirect=True)
     
-    print(f"Acc: {acc:.4f} ==> 🏷️ {label}")
+        print(f"Acc: {acc:.4f} ==> 🏷️ {label}")
+    except KeyError as e:
+        print(f"KeyError: {e} ==> 🏷️ {label}")
 
     
 def calculate_accuracy(
@@ -79,13 +83,9 @@ def report_accuracy_by_nparas(
         single_para_qapair, explicit_prompts, 
         repeat_paras, num_fewshots,
         modifyattn, modifyrope, scale_score):
-    calculate_accuracy(
-            dump_file_prefix=dump_file_prefix, 
-            single_para_qapair=single_para_qapair, explicit_prompts=explicit_prompts, repeat_paras=repeat_paras, 
-            modifyattn=False, modifyrope=False, scale_score=0, 
-            num_paraphrases=1, num_fewshots=num_fewshots)
     
-    for num_paraphrases in [2, 3, 4, 5]:
+    # for num_paraphrases in [2, 3, 4, 5]:
+    for num_paraphrases in [5]:
         calculate_accuracy(
             dump_file_prefix=dump_file_prefix, 
             single_para_qapair=single_para_qapair, explicit_prompts=explicit_prompts, repeat_paras=repeat_paras, 
