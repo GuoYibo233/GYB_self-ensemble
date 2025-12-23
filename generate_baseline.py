@@ -21,6 +21,7 @@ import multiprocessing as mp
 import os
 import warnings
 from pdb import set_trace
+from tkinter import NO
 
 import numpy as np
 import pandas as pd
@@ -45,38 +46,19 @@ def generate_baseline_origin(dataset, dataloader, model_path, args):
 
     Output: datasets/{dataset}/{model}/baseline_origin.feather
     """
-    dump_file = f"{dataset.dataset_root}/baseline_origin.feather"
-    if os.path.exists(dump_file) and not args.rewrite:
-        print(f"File {dump_file} already exists, skipping generation.")
-        print("Use --rewrite to regenerate.")
-        return dump_file
-
-    print("\n" + "=" * 70)
-    print("Baseline 1: Origin (Attention Mode Baseline)")
-    print("=" * 70)
-    print(f"Method: Uses only original questions (no paraphrases)")
-    print(f"Output: {dump_file}")
-    print()
-
-    global tokenizer, model
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map=args.device, dtype="auto"
-    )
-    tokenizer.pad_token = tokenizer.eos_token
-
     df = pd.DataFrame(
         columns=["uuid", "answers", "question", "prompt", "prediction", "generation"]
     )
     few_shot_context = dataset.get_few_shot_examples()
-
+    
+    max_new_tokens = 10 if args.num_fewshots > 0 else 30
     for uuids, answers, all_paraphrases in tqdm(
         dataloader, desc="Generating baseline (origin)"
     ):
         # Use only the original questions (paraphrase0)
         original_questions = all_paraphrases[0]
         prompts = dataset.construct_prompts(few_shot_context, original_questions)
-        generations = single_generation(model, tokenizer, prompts)
+        generations = single_generation(model, tokenizer, prompts, max_new_tokens=max_new_tokens)
         predictions = [gen.strip().split("\n")[0] for gen in generations]
 
         items = {
@@ -88,18 +70,7 @@ def generate_baseline_origin(dataset, dataloader, model_path, args):
             "generation": generations,
         }
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
-    # Lemmaize predictions and answers
-    print("\nLemmatizing predictions and answers...")
-    chunks = np.array_split(df, num_parts)
-    with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
-        results = pool.map(lemmaize_chunk, chunks)
-    df = append_lemmas(df, results)
-
-    df.to_feather(dump_file)
-    print(f"\n✅ Baseline 1 (origin) results saved to: {dump_file}")
-    print(f"   Total samples: {len(df)}")
-    return dump_file
-
+    return df
 
 def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
     """
@@ -110,30 +81,11 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
 
     Output: datasets/{dataset}/{model}/baseline_per_prompt.feather
     """
-    dump_file = f"{dataset.dataset_root}/baseline_per_prompt.feather"
-    if os.path.exists(dump_file) and not args.rewrite:
-        print(f"File {dump_file} already exists, skipping generation.")
-        print("Use --rewrite to regenerate.")
-        return dump_file
-
-    print("\n" + "=" * 70)
-    print("Baseline 2: Per-Prompt (Attention Mode Second Baseline)")
-    print("=" * 70)
-    print(f"Method: Generate with each paraphrase separately")
-    print(f"Output: {dump_file}")
-    print()
-
-    global tokenizer, model
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map=args.device, dtype="auto"
-    )
-    tokenizer.pad_token = tokenizer.eos_token
-
     df = pd.DataFrame(
         columns=["uuid", "answers", "paraphrase", "prompt", "prediction", "generation"]
     )
 
+    max_new_tokens = 10 if args.num_fewshots > 0 else 30
     for uuids, answers, all_paraphrases in tqdm(
         dataloader, desc="Generating baseline (per_prompt)"
     ):
@@ -143,11 +95,11 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
         generations_in_batch = []
         predictions_in_batch = []
 
-        few_shot_context = dataset.get_few_shot_examples()
+        few_shot_context = dataset.get_few_shot_examples(k=args.num_fewshots)
         for paraphrases in all_paraphrases:
             paraphrases_in_batch.extend(paraphrases)
             prompts = dataset.construct_prompts(few_shot_context, paraphrases)
-            generations = single_generation(model, tokenizer, prompts)
+            generations = single_generation(model, tokenizer, prompts, max_new_tokens=max_new_tokens)
             predictions = [gen.strip().split("\n")[0] for gen in generations]
             prompts_in_batch.extend(prompts)
             preds_in_batch.extend(predictions)
@@ -163,23 +115,12 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
             "generation": generations_in_batch,
         }
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
-
-    # Lemmaize predictions and answers
-    print("\nLemmatizing predictions and answers...")
-    chunks = np.array_split(df, num_parts)
-    with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
-        results = pool.map(lemmaize_chunk, chunks)
-    df = append_lemmas(df, results)
-
-    df.to_feather(dump_file)
-    print(f"\n✅ Baseline 2 (per_prompt) results saved to: {dump_file}")
-    print(f"   Total samples: {len(df)}")
-    print(f"   Unique questions: {df['uuid'].nunique()}")
-    return dump_file
+    return df
 
 
 if __name__ == "__main__":
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(
         description="Generate baseline results for self-ensemble experiments",
@@ -226,6 +167,12 @@ if __name__ == "__main__":
         help="Device to run the model on (default: cuda)",
     )
     parser.add_argument(
+        "--num_fewshots",
+        type=int,
+        default=5,
+        help="Number of few-shot examples to use in prompts (default: 5)",
+    )
+    parser.add_argument(
         "--rewrite",
         action="store_true",
         help="Regenerate baseline even if file already exists",
@@ -266,32 +213,35 @@ if __name__ == "__main__":
     print(f"Device: {args.device}")
     print(f"Rewrite: {args.rewrite}")
     print()
+    
+    
+    if args.method == "origin":
+        dump_file = f"{dataset.dataset_root}/baseline_origin.{args.num_fewshots}shots.feather"
+    elif args.method == "per_prompt":
+        dump_file = f"{dataset.dataset_root}/baseline_per_prompt.{args.num_fewshots}shots.feather"
+    else:  # args.method == "all"
+        raise NotImplementedError("Method 'all' is not implemented in this script.")    
 
-    # Generate baselines
-    output_files = []
+    if os.path.exists(dump_file) and not args.rewrite:
+        print(f"File {dump_file} already exists, skipping generation.")
+        print("Use --rewrite to regenerate.")
+        sys.exit(0)
+    print(f"🔄 Output to: {dump_file}")
 
-    if args.method in ["origin", "all"]:
-        output_file = generate_baseline_origin(dataset, dataloader, model_path, args)
-        output_files.append(output_file)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, dtype="auto")
+    tokenizer.pad_token = tokenizer.eos_token
 
-    if args.method in ["per_prompt", "all"]:
-        output_file = generate_baseline_per_prompt(
-            dataset, dataloader, model_path, args
-        )
-        output_files.append(output_file)
-
-    print("\n" + "=" * 70)
-    print("Baseline Generation Complete")
-    print("=" * 70)
-    print(f"Generated {len(output_files)} baseline(s):")
-    for f in output_files:
-        print(f"  ✅ {f}")
-    print()
-    print("Next steps:")
-    print(
-        "  1. Analyze results: python analysis/analyze_baseline.py --dataset {} --model {}".format(
-            args.dataset, args.model
-        )
-    )
-    print("  2. Compare with ensemble methods")
-    print("=" * 70)
+    if args.method == "origin":
+        df = generate_baseline_origin(dataset, dataloader, model_path, args)
+    elif args.method == "per_prompt":
+        df = generate_baseline_per_prompt(dataset, dataloader, model_path, args)
+    
+    # Lemmaize predictions and answers
+    chunks = np.array_split(df, num_parts)
+    with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
+        results = pool.map(lemmaize_chunk, chunks)
+    df = append_lemmas(df, results)
+    df.to_feather(dump_file)
+    print(f"\n✅ Baseline (per_prompt) results saved to: {dump_file}")
+    

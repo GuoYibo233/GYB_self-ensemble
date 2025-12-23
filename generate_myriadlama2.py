@@ -488,19 +488,14 @@ def myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10, modi
         else:
             generated = torch.cat([generated, next_token], dim=1)
 
-        # Debug: show what was generated
         decoded_token = tokenizer.decode(next_token[0], skip_special_tokens=False)
-        # print(
-        #     f"  Step {step}: generated token '{decoded_token}' (id: {next_token.item()})"
-        # )
-
+        
         # Check for EOS or newline (likely end of one-word answer)
         if next_token.item() == tokenizer.eos_token_id:
-            # print(f"  Stopped: EOS token")
             break
+        
         # Also check if we generated a newline or space (end of word)
         if "\n" in decoded_token and step > 0:  # Allow at least one token
-            # print(f"  Stopped: newline detected")
             break
 
     # Decode output
@@ -651,6 +646,7 @@ if __name__ == "__main__":
     if args.num_fewshots != 5:
         dump_file += f"{args.num_fewshots}fshots."
 
+    max_new_tokens = 10 if args.num_fewshots > 0 else 30
     dump_file += f"{args.num_samples}samples.{args.num_paraphrases}paras.feather"
 
     # Lemmatization mode
@@ -726,7 +722,7 @@ if __name__ == "__main__":
                 
         # Generate using MyriadLAMA-specific FlexAttention
         generation = myriadlama_flex_generation(
-            prompt, segment_metadata, max_new_tokens=10, modify_rope=args.modify_rope, has_bos=has_bos
+            prompt, segment_metadata, max_new_tokens=max_new_tokens, modify_rope=args.modify_rope, has_bos=has_bos
         )
 
         # Extract prediction (first word only for MyriadLAMA)
@@ -755,13 +751,11 @@ if __name__ == "__main__":
     chunks = np.array_split(df, num_parts)
     with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
         results = pool.map(lemmaize_chunk, chunks)
-
     try:
         df = append_lemmas(df, results)
-        df["answer_lemmas"] = df["answer_lemmas"].apply(lambda xs: [list(x) for x in xs])
-        df["predict_lemma"] = df["predict_lemma"].apply(lambda xs: xs[0])
     except Exception as e:
         print(f"❌ Lemmatization failed: {type(e).__name__}: {e}")
+        set_trace()
     finally:
         df.to_feather(dump_file)
         print(f"✅ Results saved to {dump_file}")
