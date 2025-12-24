@@ -569,7 +569,7 @@ if __name__ == "__main__":
         print(f"✅ File {dump_file} already exists, skipping generation.")
         exit(0)
     
-    max_new_tokens = 10 if args.num_fewshots > 0 else 30
+    max_new_tokens = 10 if args.num_fewshots > 0 else 20
     dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
     
     print(f"🔄 Starting generation to {dump_file}")

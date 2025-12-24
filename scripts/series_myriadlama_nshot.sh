@@ -19,6 +19,12 @@ for MODEL in $MODELS ; do
         CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
             --model $MODEL \
             --single_para_qapair \
+            --num_paraphrases 1 \
+            --num_fewshots $NUM_FEWSHOTS
+
+        CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
+            --model $MODEL \
+            --single_para_qapair \
             --num_paraphrases 5 \
             --num_fewshots $NUM_FEWSHOTS
 
@@ -27,29 +33,9 @@ for MODEL in $MODELS ; do
             --single_para_qapair \
             --num_paraphrases 5 \
             --num_fewshots $NUM_FEWSHOTS \
-            --scale_factor
-
-        CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
-            --model $MODEL \
-            --single_para_qapair \
-            --num_paraphrases 5 \
-            --num_fewshots $NUM_FEWSHOTS \
-            --modify_attn
-
-        CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
-            --model $MODEL \
-            --single_para_qapair \
-            --num_paraphrases 5 \
-            --num_fewshots $NUM_FEWSHOTS \
             --modify_attn \
             --scale_factor
-
-        CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
-            --model $MODEL \
-            --num_paraphrases 5 \
-            --num_fewshots $NUM_FEWSHOTS \
-            --modify_rope
-
+        
         CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
             --model $MODEL \
             --single_para_qapair \

@@ -27,6 +27,13 @@ for MODEL in $MODELS; do
 
     CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
         --model $MODEL \
+        --single_para_qapair \
+        --num_paraphrases $NUM_PARAS \
+        --num_fewshots $NUM_FEWSHOTS \
+        --scale_factor
+
+    CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
+        --model $MODEL \
         --rewrite \
         --single_para_qapair \
         --num_paraphrases $NUM_PARAS \

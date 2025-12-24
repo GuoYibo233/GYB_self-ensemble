@@ -2,7 +2,6 @@ import itertools
 import multiprocessing as mp
 import os
 import random
-import token
 import warnings
 from pdb import set_trace
 
@@ -54,16 +53,16 @@ def ensemble_generation(
         with torch.no_grad():
             if ensemble_method is None:
                 logits = model(inputs["input_ids"], attention_mask=inputs["attention_mask"]).logits[:, -1, :]
-            elif ensemble_method == "layer_output":
+            elif ensemble_method == "layer_output_avg":
                 logits = next_token_logits_with_weighted_layer_outavg(
                     model, inputs['input_ids'], inputs['attention_mask'],
                     layer_indices=layer_indices, alpha=ensemble_alpha, 
                     weights=None, token_mode=token_mode)
-            elif ensemble_method == "ffn_activation":
+            elif ensemble_method.startswith("ffn_activation"):
                 logits = next_token_logits_with_weighted_ffn_midavg(
                     model, inputs['input_ids'], inputs['attention_mask'],
                     layer_indices=layer_indices, alpha=ensemble_alpha, 
-                    weights=None, token_mode=token_mode)
+                    weights=None, token_mode=token_mode, use_max=(ensemble_method=="ffn_activation_max"))
             else:
                 raise ValueError(f"Unknown ensemble method: {ensemble_method}")
         
@@ -293,7 +292,8 @@ def make_ffn_mid_activation_hook(
     attention_mask: torch.Tensor,
     weights: torch.Tensor | None = None,
     alpha: float = 1.0,
-    token_mode: str = "last",   # "last" or "all"
+    token_mode: str = "last", # "last" or "all"
+    use_max: bool = False
 ):
     """
     Returns a forward *pre*-hook that edits the input to the FFN output projection.
@@ -318,7 +318,10 @@ def make_ffn_mid_activation_hook(
             # mean_t: [1,D]
             # This is heavier but simple.
             for t in range(T):
-                mean_t = _weighted_batch_average(x[:, t, :], weights)  # [1,D]
+                if not use_max:
+                    mean_t = _weighted_batch_average(x[:, t, :], weights)  # [1,D]
+                else:
+                    mean_t = x[:, t, :].max(dim=0, keepdim=True).values  # [1,D]
                 x[:, t, :] = x[:, t, :] * (1 - alpha) + mean_t * alpha
         else:
             # Only last real token per sample
@@ -327,7 +330,10 @@ def make_ffn_mid_activation_hook(
 
             rows = torch.arange(B, device=x.device)
             x_last = x[rows, last_pos, :]  # [B,D]
-            mean_last = _weighted_batch_average(x_last, weights)  # [1,D]
+            if not use_max:
+                mean_last = _weighted_batch_average(x_last, weights)
+            else:
+                mean_last = x_last.max(dim=0, keepdim=True).values
             x[rows, last_pos, :] = x_last * (1 - alpha) + mean_last * alpha
         # set_trace()
         return (x, *rest)
@@ -343,6 +349,7 @@ def next_token_logits_with_weighted_ffn_midavg(
     alpha: float = 1.0,
     weights: torch.Tensor | None = None,
     token_mode: str = "last",  # "last" or "all"
+    use_max: bool = False,
 ):
     """
     Apply weighted batch-averaging to the FFN middle activations (input to FFN out proj)
@@ -363,6 +370,7 @@ def next_token_logits_with_weighted_ffn_midavg(
         weights=weights,
         alpha=alpha,
         token_mode=token_mode,
+        use_max=use_max,
     )
 
     handles = []
@@ -410,7 +418,7 @@ if __name__ == "__main__":
     parser.add_argument("--ensemble_layer", type=int, default=16, help="Transformer layer index to apply ensemble merging")
     parser.add_argument("--ensemble_alpha", type=float, default=1.0, help="alpha for ensemble merging of transformer outputs")
     parser.add_argument("--multilayer", action="store_true", help="Use only a single layer's output for ensemble (not used currently)")
-    parser.add_argument("--token_mode", type=str, default="last", choices=["last", "all", "new"], help="Token mode")
+    parser.add_argument("--token_mode", type=str, default="last", choices=["last", "all"], help="Token mode")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose output")
     parser.add_argument("--rewrite", action="store_true", help="Rewrite existing output files")
     args = parser.parse_args()    
@@ -436,12 +444,11 @@ if __name__ == "__main__":
         dump_file += "repeatparas."
     
     if args.ensemble_method == "layer_output_avg":
-        dump_file += f"avglayer.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha * 10)}.token-{args.token_mode}."
+        dump_file += f"avglayer.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
     elif args.ensemble_method == "ffn_activation_avg":
-        dump_file += f"avgffn.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha * 10)}.token-{args.token_mode}."
+        dump_file += f"avgffn.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
     elif args.ensemble_method == "ffn_activation_max":
-        dump_file += f"maxffn.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha * 10)}.token-{args.token_mode}."
-
+        dump_file += f"maxffn.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
     if args.multilayer:
         dump_file += "multilayer."
     if args.num_fewshots != 5:
