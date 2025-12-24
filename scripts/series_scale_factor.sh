@@ -7,7 +7,7 @@ MODEL_NAME=$3
 # for MODEL in llama3.2_3b_it llama3.2_1b_it llama3.1_8b_it llama3.2_3b llama3.2_1b llama3.1_8b ; do
 
 for SCALE_FACTOR in 0.5 1.0 1.5 2.0 2.5 3.0 ; do
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 generate_myriadlama2.py \
+    CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
         --debug \
         --model $MODEL_NAME \
         --single_para_qapair \

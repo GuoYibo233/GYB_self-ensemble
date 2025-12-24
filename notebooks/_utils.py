@@ -1,12 +1,11 @@
 import os
-from pdb import set_trace
 
 import pandas
 
 from utils import partial_match_scores, partial_match_scores_use_generation
 
 
-def get_filenames(
+def get_parallel_ensemble_filename(
         dump_file_prefix, 
         modifyattn, modifyrope, 
         scale_score, num_fewshots,
@@ -33,7 +32,7 @@ def get_filenames(
     # print(f"Loading from {dump_file}")
     return dump_file
 
-def _calculate_accuracy(df, label, use_generation=False):
+def calculate_accuracy(df, label, use_generation=False):
     # answers = [answers for answers in df["answer_lemmas"]]
     answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
     try:
@@ -49,12 +48,12 @@ def _calculate_accuracy(df, label, use_generation=False):
         print(f"KeyError: {e} ==> 🏷️ {label}")
 
     
-def calculate_accuracy(
+def calculate_series_ensemble_accuracy(
         dump_file_prefix,
         single_para_qapair, explicit_prompts, repeat_paras,
         modifyattn, modifyrope, scale_score,
         num_paraphrases, num_fewshots, use_generation=False):
-    filename = get_filenames(
+    filename = get_parallel_ensemble_filename(
         dump_file_prefix=dump_file_prefix,
         modifyattn=modifyattn, modifyrope=modifyrope, scale_score=scale_score,
         single_para_qapair=single_para_qapair, explicit_prompts=explicit_prompts, 
@@ -75,10 +74,10 @@ def calculate_accuracy(
     
     if modifyattn is False and modifyrope is False and scale_score == 0 and num_paraphrases == 1:
         label += " (Baseline)"
-    _calculate_accuracy(df, label, use_generation=use_generation)
+    calculate_accuracy(df, label, use_generation=use_generation)
     return df
 
-def report_accuracy_by_nparas(
+def report_series_ensemble_accuracy_by_nparas(
         dump_file_prefix, 
         single_para_qapair, explicit_prompts, 
         repeat_paras, num_fewshots,
@@ -86,13 +85,13 @@ def report_accuracy_by_nparas(
     
     # for num_paraphrases in [2, 3, 4, 5]:
     for num_paraphrases in [5]:
-        calculate_accuracy(
+        calculate_series_ensemble_accuracy(
             dump_file_prefix=dump_file_prefix, 
             single_para_qapair=single_para_qapair, explicit_prompts=explicit_prompts, repeat_paras=repeat_paras, 
             modifyattn=modifyattn, modifyrope=modifyrope, scale_score=scale_score, 
             num_paraphrases=num_paraphrases, num_fewshots=num_fewshots)
     
-def report_accuracy_by_nshot(
+def report_series_ensemble_accuracy_by_nshot(
         dump_file_prefix, 
         single_para_qapair, explicit_prompts, 
         repeat_paras, num_paraphrases,
@@ -100,9 +99,63 @@ def report_accuracy_by_nshot(
         use_generation):
     for num_fewshots in [0, 1, 2, 3, 4, 5]:
     # for num_fewshots in [0]:
-        calculate_accuracy(
+        calculate_series_ensemble_accuracy(
             dump_file_prefix=dump_file_prefix, 
             single_para_qapair=single_para_qapair, explicit_prompts=explicit_prompts, repeat_paras=repeat_paras, 
             modifyattn=modifyattn, modifyrope=modifyrope, scale_score=scale_score, 
             num_paraphrases=num_paraphrases, num_fewshots=num_fewshots, 
             use_generation=use_generation)
+        
+
+def get_series_ensemble_filename(
+        dump_file_prefix, repeat_paras, 
+        logits_ensemble_method,
+        ensemble_method, ensemble_layer,
+        multilayer, ensemble_alpha, token_mode,
+        num_fewshots, num_paraphrases, num_samples):
+    # dump_file = f"{dataset_root}/{ds_name}/{model_name}/myriadlama."
+    dump_file_prefix += f"logits.{logits_ensemble_method}."
+    if repeat_paras:
+        dump_file_prefix += "repeatparas."
+    
+    if ensemble_method == "layer_output":
+        dump_file_prefix += f"mergelayer.layer{ensemble_layer}.alpha{int(ensemble_alpha * 10)}.token-{token_mode}."
+    elif ensemble_method == "ffn_activation":
+        dump_file_prefix += f"mergeffn.layer{ensemble_layer}.alpha{int(ensemble_alpha * 10)}.token-{token_mode}."
+
+    if multilayer:
+        dump_file_prefix += "multilayer."
+    if num_fewshots != 5:
+        dump_file_prefix += f"{num_fewshots}fshots."
+    
+    dump_file = f"{dump_file_prefix}{num_samples}samples.{num_paraphrases}paras.feather"
+    return dump_file
+
+def calculate_parallel_ensemble_accuracy(
+        dump_file_prefix, repeat_paras,
+        num_paraphrases, num_fewshots,
+        logits_ensemble_method,
+        ensemble_method=None, ensemble_layer=None, 
+        multilayer=False, ensemble_alpha=1.0, 
+        token_mode="all", use_generation=False):
+    filename = get_series_ensemble_filename(
+        dump_file_prefix=dump_file_prefix, repeat_paras=repeat_paras, 
+        logits_ensemble_method=logits_ensemble_method,
+        ensemble_method=ensemble_method, ensemble_layer=ensemble_layer,
+        multilayer=multilayer, ensemble_alpha=ensemble_alpha, token_mode=token_mode,
+        num_fewshots=num_fewshots, num_paraphrases=num_paraphrases, num_samples=5)
+    if os.path.exists(filename) is False:
+        basename = filename.replace(dump_file_prefix, "./")
+        print(f"File {basename} does not exist!")
+        return None
+    
+
+    df = pandas.read_feather(filename)
+    label = f"{num_paraphrases}paras {num_fewshots}shots "
+    label += f"{'+Repeat' if repeat_paras else ''} "
+    label += f"{ensemble_method} layer{ensemble_layer} "
+    label += f"{'Multilayer' if multilayer else ''} "
+    label += f"alpha{ensemble_alpha} token-{token_mode}"
+    
+    calculate_accuracy(df, label, use_generation=use_generation)
+    return df

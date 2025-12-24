@@ -45,7 +45,7 @@ for uuids, answers, all_paraphrases in tqdm(dataloader):
 import torch
 from transformers import BatchEncoding
 
-from generate_myriadlama2 import (
+from series_ensemble import (
     FlexAttentionWrapper,
     create_myriadlama_mask_mod,
     create_myriadlama_score_mod,
