@@ -2,7 +2,7 @@ import os
 
 # Set HuggingFace cache to net directory for all models
 # All models will be downloaded/cached to this centralized location
-HF_HOME = "/net/tokyo100-10g/data/str01_01/xzhao/huggingface"
+HF_HOME = "/net/tokyo100-10g/data/str01_01/y-guo"
 os.environ["HF_HOME"] = HF_HOME
 os.environ["HUGGINGFACE_HUB_CACHE"] = HF_HOME
 
