@@ -19,7 +19,7 @@ def get_parallel_ensemble_filename(
     if repeat_paras:
         dump_file_prefix += "repeatparas."
     if scale_score:
-        dump_file_prefix += "scalescore20."
+        dump_file_prefix += "scalescore."
     if single_para_qapair:
         dump_file_prefix += "singleparaqapair."
     if explicit_prompts:
@@ -64,8 +64,11 @@ def calculate_series_ensemble_accuracy(
         print(f"File {basename} does not exist!")
         return None
     
-
-    df = pandas.read_feather(filename)
+    try:
+        df = pandas.read_feather(filename)
+    except Exception as e:
+        print(f"Error reading {filename}: {e}")
+        return None
     label = f"{num_paraphrases}paras {num_fewshots}shots "
     label += f"{'1QA' if single_para_qapair else ''} "
     label += f"{'+Explicit' if explicit_prompts else ''} "

@@ -179,7 +179,6 @@ def create_myriadlama_mask_mod(segment_positions, prefix_len):
 def create_myriadlama_score_mod(
     segment_positions,
     prefix_len: int,
-    scaling_factor: float,
     device: torch.device | None = None,
     dtype: torch.dtype | None = None,
 ):
@@ -191,8 +190,15 @@ def create_myriadlama_score_mod(
     ]
     assert len(para_spans) > 0, "No paraphrase spans found in segment_positions"
     
-    # scaling_factor = 2
-    weight = 1 + scaling_factor/len(para_spans)
+    # weight = 1 + scale_factor/len(para_spans)
+    # Calculate length-based weight
+    para_segs = [seg for seg in segment_positions if seg.get("type") == "paraphrase"]
+    shared_segs = [seg for seg in segment_positions if seg.get("type") != "paraphrase"]
+    len_para = sum(para_segs[i]["end"] - para_segs[i]["start"] for i in range(len(para_segs)))
+    len_share = sum(shared_segs[i]["end"] - shared_segs[i]["start"] for i in range(len(shared_segs)))
+    len_para_avg = len_para / len(para_segs)
+    weight = len_para_avg * (len_share + len_para_avg) / ((len_para_avg + len_share) * len_para)
+
     # Build a boolean mask over *prefix positions* [0, prefix_len)
     # True where kv is inside a paraphrase span (restricted to prefix)
     para_mask = torch.zeros(prefix_len, device=device, dtype=torch.bool)
@@ -439,41 +445,36 @@ def myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10, modi
         start_generation_token_id = len(full_tokens)
 
     # Create FlexAttention wrapper
-    if args.modify_attn or args.scale_factor > 0:
+    if args.modify_attn or args.scale_factor:
         flex_wrapper = FlexAttentionWrapper(model)
 
+    mask_mod, score_mod = None, None
     if args.modify_attn:
         mask_mod = create_myriadlama_mask_mod(
             segment_positions, attn_mod_len
         )
-    if args.scale_factor > 0:
+    if args.scale_factor:
         score_mod = create_myriadlama_score_mod(
             segment_positions, attn_mod_len, 
-            scaling_factor=args.scale_factor,
             device=model.device, dtype=model.dtype
         )
 
     # Generation loop
     generated = None
     for step in range(max_new_tokens):
-        if args.modify_attn or args.scale_factor > 0:
-            flex_wrapper.patch_model(mask_mod if args.modify_attn else None, score_mod if args.scale_factor > 0 else None)
+        if args.modify_attn or args.scale_factor:
+            flex_wrapper.patch_model(mask_mod, score_mod)
         try:
             logits = model(
                 inputs["input_ids"], 
                 attention_mask=inputs["attention_mask"], 
                 position_ids=position_ids).logits[:, -1, :]
         except Exception as e:
-            import traceback
-            print(f"⚠️  Generation step {step} failed: {type(e).__name__}: {e}")
-            traceback.print_exc()
-            flex_wrapper.unpatch_model()
-            logits = model(inputs["input_ids"]).logits[:, -1, :]
+            raise RuntimeError(f"Generation failed at step {step}: {type(e).__name__}: {e}")
         finally:
-            # Always unpatch after each step
-            if args.modify_attn:
+            if args.modify_attn or args.scale_factor:
                 flex_wrapper.unpatch_model()
-        
+    
         # Token selection
         next_token = torch.argmax(logits, dim=-1).unsqueeze(1)
         inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token], dim=1)
@@ -524,7 +525,7 @@ if __name__ == "__main__":
     parser.add_argument("--lemmaize", action="store_true", help="Normalize predictions and answers to lemmas")
     parser.add_argument("--modify_rope", action="store_true", help="Modify RoPE embeddings during generation")
     parser.add_argument("--modify_attn", action="store_true", help="Modify attention masks using FlexAttention")
-    parser.add_argument("--scale_factor", type=float, default=0.0, help="Scale attention scores using FlexAttention (default: 0.0, no scaling)")
+    parser.add_argument("--scale_factor", action="store_true", help="Scale attention scores using FlexAttention")
     parser.add_argument("--num_samples", type=int, default=5, help="Number of samples to generate for testing (default: 5)")
     parser.add_argument("--num_fewshots", type=int, default=5, help="Number of few-shot examples to use (default: 5)")
     parser.add_argument("--num_paraphrases", type=int, default=2, help="Number of paraphrases to use (same for main question and few-shot examples, default: 5)")
@@ -554,8 +555,8 @@ if __name__ == "__main__":
         dump_file += "modifyrope."
     if args.repeat_paras:
         dump_file += "repeatparas."
-    if args.scale_factor > 0:
-        dump_file += f"scalescore{str(int(args.scale_factor*10))}."
+    if args.scale_factor:
+        dump_file += "scalescore."
     if args.single_para_qapair:
         dump_file += "singleparaqapair."
     if args.explicit_prompts:
