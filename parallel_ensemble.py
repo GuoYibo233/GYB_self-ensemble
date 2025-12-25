@@ -24,7 +24,7 @@ def ensemble_generation(
     integration_method="max", 
     weights=None, 
     max_new_tokens=10,
-    ensemble_method="logits", 
+    ensemble_method=None, 
     multilayer=False, 
     token_mode="last",
     ensemble_layer_idx=10, 
@@ -55,7 +55,7 @@ def ensemble_generation(
                 logits = model(inputs["input_ids"], attention_mask=inputs["attention_mask"]).logits[:, -1, :]
             elif ensemble_method == "layer_output_avg":
                 logits = next_token_logits_with_weighted_layer_outavg(
-                    model, inputs['input_ids'], inputs['attention_mask'],
+                    model, inputs['input_ids'], inputs['attention_mask'], 
                     layer_indices=layer_indices, alpha=ensemble_alpha, 
                     weights=None, token_mode=token_mode)
             elif ensemble_method.startswith("ffn_activation"):

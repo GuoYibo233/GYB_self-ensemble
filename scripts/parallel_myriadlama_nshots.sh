@@ -23,5 +23,12 @@ for MODEL in $MODELS ; do
             --num_paraphrases 5 \
             --num_samples 5 \
             --num_fewshots $NUM_FEWSHOTS
+        CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
+            --logits_ensemble_method max \
+            --model $MODEL \
+            --dataset myriadlama \
+            --num_paraphrases 5 \
+            --num_samples 5 \
+            --num_fewshots $NUM_FEWSHOTS
     done
 done

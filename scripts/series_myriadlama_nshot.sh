@@ -15,7 +15,7 @@ else
 fi
 
 for MODEL in $MODELS ; do
-    for NUM_FEWSHOTS in 0 2 4 6 8 10; do
+    for NUM_FEWSHOTS in 0 2 4 6 8; do
         CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
             --model $MODEL \
             --single_para_qapair \

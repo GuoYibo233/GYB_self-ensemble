@@ -39,5 +39,5 @@ for MODEL in "${MODELS[@]}"; do
         --single_para_qapair \
         --num_paraphrases 5 \
         --modify_attn \
-        --modify_rope        
+        --modify_rope
 done

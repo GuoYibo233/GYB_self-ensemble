@@ -52,7 +52,7 @@ def calculate_series_ensemble_accuracy(
         dump_file_prefix,
         single_para_qapair, explicit_prompts, repeat_paras,
         modifyattn, modifyrope, scale_score,
-        num_paraphrases, num_fewshots, use_generation=False):
+        num_paraphrases, num_fewshots, use_generation=True):
     filename = get_parallel_ensemble_filename(
         dump_file_prefix=dump_file_prefix,
         modifyattn=modifyattn, modifyrope=modifyrope, scale_score=scale_score,
@@ -68,6 +68,7 @@ def calculate_series_ensemble_accuracy(
         df = pandas.read_feather(filename)
     except Exception as e:
         print(f"Error reading {filename}: {e}")
+        os.remove(filename)
         return None
     label = f"{num_paraphrases}paras {num_fewshots}shots "
     label += f"{'1QA' if single_para_qapair else ''} "
@@ -121,16 +122,17 @@ def get_series_ensemble_filename(
     if repeat_paras:
         dump_file_prefix += "repeatparas."
     
-    if ensemble_method == "layer_output":
-        dump_file_prefix += f"mergelayer.layer{ensemble_layer}.alpha{int(ensemble_alpha * 10)}.token-{token_mode}."
-    elif ensemble_method == "ffn_activation":
-        dump_file_prefix += f"mergeffn.layer{ensemble_layer}.alpha{int(ensemble_alpha * 10)}.token-{token_mode}."
-
+    if ensemble_method == "layer_output_avg":
+        dump_file_prefix += f"avglayer.layer{ensemble_layer}.alpha{int(ensemble_alpha*100)}.token-{token_mode}."
+    elif ensemble_method == "ffn_activation_avg":
+        dump_file_prefix += f"avgffn.layer{ensemble_layer}.alpha{int(ensemble_alpha*100)}.token-{token_mode}."
+    elif ensemble_method == "ffn_activation_max":
+        dump_file_prefix += f"maxffn.layer{ensemble_layer}.alpha{int(ensemble_alpha*100)}.token-{token_mode}."
     if multilayer:
         dump_file_prefix += "multilayer."
     if num_fewshots != 5:
         dump_file_prefix += f"{num_fewshots}fshots."
-    
+        
     dump_file = f"{dump_file_prefix}{num_samples}samples.{num_paraphrases}paras.feather"
     return dump_file
 
@@ -152,8 +154,12 @@ def calculate_parallel_ensemble_accuracy(
         print(f"File {basename} does not exist!")
         return None
     
-
-    df = pandas.read_feather(filename)
+    try:
+        df = pandas.read_feather(filename)
+    except Exception as e:
+        print(f"Error reading {filename}: {e}")
+        os.remove(filename)
+        return None
     label = f"{num_paraphrases}paras {num_fewshots}shots "
     label += f"{'+Repeat' if repeat_paras else ''} "
     label += f"{ensemble_method} layer{ensemble_layer} "
