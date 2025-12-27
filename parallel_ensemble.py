@@ -20,6 +20,8 @@ num_parts = 8
 
 @torch.no_grad()
 def ensemble_generation(
+    model,
+    tokenizer,
     prompt_sets, 
     integration_method="max", 
     weights=None, 
@@ -479,7 +481,7 @@ if __name__ == "__main__":
 
     sample_count = 0
     all_samples = []
-    for uuids, answers, all_paraphrases in tqdm(dataloader, desc="Preparing samples"):
+    for uuids, answers, all_paraphrases in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
         # Use sampling function to select paraphrases
         # Same uuid will always produce the same sampling results (matching series_ensemble.py)
         samples = sample_paraphrases_per_item(
@@ -502,7 +504,7 @@ if __name__ == "__main__":
     print(f"Total samples to process: {len(all_samples)}")
     
     # Process each sample
-    for uuid, answer, sampled_paraphrases in tqdm(all_samples, desc="Generating"):
+    for uuid, answer, sampled_paraphrases in tqdm(all_samples, desc="Generating", dynamic_ncols=True):
         all_prompts = []
         confidences = [] if args.logits_ensemble_method.startswith("weighted_") else None
         
@@ -520,7 +522,9 @@ if __name__ == "__main__":
             all_prompts.append(prompts)
         
         generation = ensemble_generation(
-            all_prompts, 
+            model,
+            tokenizer,
+            prompt_sets=all_prompts, 
             integration_method=args.logits_ensemble_method, 
             weights=[confidences] if confidences else None, 
             max_new_tokens=max_new_tokens, 

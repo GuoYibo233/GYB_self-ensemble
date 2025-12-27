@@ -53,7 +53,7 @@ def generate_baseline_origin(dataset, dataloader, model_path, args):
     
     max_new_tokens = 10 if args.num_fewshots > 0 else 30
     for uuids, answers, all_paraphrases in tqdm(
-        dataloader, desc="Generating baseline (origin)"
+        dataloader, desc="Generating baseline (origin)", dynamic_ncols=True
     ):
         # Use only the original questions (paraphrase0)
         original_questions = all_paraphrases[0]
@@ -87,7 +87,7 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
 
     max_new_tokens = 10 if args.num_fewshots > 0 else 30
     for uuids, answers, all_paraphrases in tqdm(
-        dataloader, desc="Generating baseline (per_prompt)"
+        dataloader, desc="Generating baseline (per_prompt)", dynamic_ncols=True
     ):
         preds_in_batch = []
         prompts_in_batch = []

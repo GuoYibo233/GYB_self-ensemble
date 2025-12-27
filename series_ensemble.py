@@ -588,7 +588,7 @@ if __name__ == "__main__":
 
     sample_count = 0
     samples = []
-    for uuids, answers, all_paraphrases in tqdm(dataloader):
+    for uuids, answers, all_paraphrases in tqdm(dataloader, dynamic_ncols=True):
         assert len(uuids) == 1, "Batch size must be 1 for MyriadLAMA generation"
         uuid, answer = uuids[0], answers[0]
         all_paraphrases = list(zip(*all_paraphrases))[0]
@@ -615,7 +615,7 @@ if __name__ == "__main__":
         num_workers=0,
     )
 
-    for batch in tqdm(sample_dataloader):
+    for batch in tqdm(sample_dataloader, dynamic_ncols=True):
         uuids, answers, sampled_paraphrases = zip(*batch)
         batch_predictions = []
         batch_generations = []

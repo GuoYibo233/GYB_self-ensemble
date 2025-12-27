@@ -26,7 +26,7 @@ def normalize_chunk(chunk):
     greedy_lemmas = []
     sample_lemmas = []
     answer_lemmas = []
-    for answers, greedy_predict, sample_predicts in tqdm(zip(chunk["answers"], chunk["greedy_predict"], chunk["sample_predicts"]), total=len(chunk)):
+    for answers, greedy_predict, sample_predicts in tqdm(zip(chunk["answers"], chunk["greedy_predict"], chunk["sample_predicts"]), total=len(chunk), dynamic_ncols=True):
         greedy = normalize_predicts(greedy_predict)
         samples = [normalize_predicts(sample) for sample in sample_predicts]
         answers = [normalize_predicts(ans) for ans in answers]
@@ -116,7 +116,7 @@ if __name__ == "__main__":
     # Do sampling and generation
     items = []
     few_shot_prompt = dataset.get_few_shot_examples()
-    for uuids, answers, all_paraphrases in tqdm(dataloader):
+    for uuids, answers, all_paraphrases in tqdm(dataloader, dynamic_ncols=True):
         for paraphrases in all_paraphrases:
             prompts = dataset.construct_prompts(few_shot_prompt, paraphrases)
             multinormal_samples = multinormal_generation(model, tokenizer, prompts, num_samples=100)

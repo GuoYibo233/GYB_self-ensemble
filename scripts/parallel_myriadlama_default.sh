@@ -93,4 +93,30 @@ for MODEL in $MODELS ; do
         --ensemble_alpha 1 \
         --token_mode last \
         --multilayer
+    
+    CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
+        --logits_ensemble_method max \
+        --model $MODEL \
+        --dataset myriadlama \
+        --num_paraphrases $NUM_PARAS \
+        --num_fewshots $NUM_FEWSHOTS \
+        --num_samples 5 \
+        --ensemble_method ffn_activation_avg \
+        --ensemble_layer $LAYER \
+        --ensemble_alpha 1 \
+        --token_mode last \
+        --multilayer
+    
+    CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
+        --logits_ensemble_method max \
+        --model $MODEL \
+        --dataset myriadlama \
+        --num_paraphrases $NUM_PARAS \
+        --num_fewshots $NUM_FEWSHOTS \
+        --num_samples 5 \
+        --ensemble_method ffn_activation_max \
+        --ensemble_layer $LAYER \
+        --ensemble_alpha 1 \
+        --token_mode last \
+        --multilayer
 done

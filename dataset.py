@@ -151,8 +151,10 @@ class ParaPharaseDataset:
         answer = example["answers"][0]
         return f"Q: {question}\nA: {answer}"
 
-    def construct_prompts(self, few_shot_examples, questions):
-        prompts = [f"{self.instruction}\n\n{few_shot_examples}\n\nQ: {question}\nA:" for question in questions]
+    def construct_prompts(self, few_shot_examples, questions, instruction=None):
+        if instruction is None:
+            instruction = self.instruction
+        prompts = [f"{instruction}\n\n{few_shot_examples}\n\nQ: {question}\nA:" for question in questions]
         return prompts
 
     def construct_prompts_with_paraphrases(self, few_shot_examples, paraphrases):
@@ -229,7 +231,7 @@ class WebQADataset(ParaPharaseDataset):
             print(f"Generating paraphrases for iteration {i+1}")
             all_paraphrases = []
             all_questions = []
-            for questions, answers in tqdm(dataloader, desc="Generating paraphrases"):
+            for questions, answers in tqdm(dataloader, desc="Generating paraphrases", dynamic_ncols=True):
                 answers = [ans[0] for ans in answers]
                 generations = generate_paraphrases(model, tokenizer, questions, idx=i, seed=i)
                 paraphrases = [gen.strip().split('\n')[0] for gen in generations]
@@ -308,7 +310,7 @@ class MyriadLamaDataset(ParaPharaseDataset):
         df = ds.to_pandas()
 
         items = []
-        for uuid, sdf in tqdm(df.groupby('uuid'), desc="Processing MyriadLAMA dataset"):
+        for uuid, sdf in tqdm(df.groupby('uuid'), desc="Processing MyriadLAMA dataset", dynamic_ncols=True):
             uuid = sdf['uuid'].iloc[0]
             rel = sdf['rel_uri'].iloc[0]
             answers = sdf['obj_aliases'].iloc[0].tolist()

@@ -63,7 +63,7 @@ if __name__ == "__main__":
 
     num_parts = 20
     data_root = f"/home/xzhao/workspace/GYB_self-ensemble/datasets/myriadlama/{args.model}/"
-    for filename in tqdm(os.listdir(data_root)):
+    for filename in tqdm(os.listdir(data_root), dynamic_ncols=True):
         if not filename.endswith(".feather"):
             continue
 

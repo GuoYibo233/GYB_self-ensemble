@@ -142,7 +142,7 @@ if __name__ == "__main__":
         for i in range(5):
             print(f"Generating paraphrases for iteration {i+1}")
             all_paraphrases = []
-            for questions, answers in tqdm(dataloader):
+            for questions, answers in tqdm(dataloader, dynamic_ncols=True):
                 answers = [ans[0] for ans in answers]
                 generations = generate_paraphrases(questions, idx=i, seed=i)
                 paraphrases = [gen.strip().split('\n')[0] for gen in generations]
@@ -160,7 +160,7 @@ if __name__ == "__main__":
         df = ds.to_pandas()
 
         items = []
-        for uuid, sdf in tqdm(df.groupby('uuid')):
+        for uuid, sdf in tqdm(df.groupby('uuid'), dynamic_ncols=True):
             uuid = sdf['uuid'].iloc[0]
             rel = sdf['rel_uri'].iloc[0]
             answers = sdf['obj_aliases'].iloc[0].tolist()

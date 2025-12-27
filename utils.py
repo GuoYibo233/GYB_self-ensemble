@@ -180,7 +180,7 @@ def single_generation(model, tokenizer, prompts, max_new_tokens=10):
 
     generated = None
 
-    for _ in range(max_new_tokens):
+    for step in range(max_new_tokens):
         with torch.no_grad():
             logits = model(
                 inputs["input_ids"], attention_mask=inputs["attention_mask"]
@@ -191,11 +191,19 @@ def single_generation(model, tokenizer, prompts, max_new_tokens=10):
         inputs["attention_mask"] = torch.cat(
             [inputs["attention_mask"], torch.ones_like(next_token)], dim=1
         )
-
+        
         if generated is None:
             generated = next_token
         else:
             generated = torch.cat([generated, next_token], dim=1)
+
+        decoded_token = tokenizer.decode(next_token[0], skip_special_tokens=False)
+        
+        if next_token.item() == tokenizer.eos_token_id:
+            break
+        
+        if "\n" in decoded_token and step > 0:
+            break
 
     generated_texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
     new_generated_texts = [gen.strip() for gen in generated_texts]
@@ -209,7 +217,7 @@ def take_until_punct_or_space(tokens: list[str]) -> list[str]:
     result = []
     for tok in tokens:
         if tok.isspace() or tok in string.punctuation:
-            break
+            continue
         result.append(tok)
     return result
 
