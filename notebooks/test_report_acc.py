@@ -20,7 +20,7 @@ report_accuracy = partial(
     explicit_prompts=False,
     repeat_paras=False, 
     num_paraphrases=5, 
-    use_generation=False)
+    use_generation=True)
 
 
 report_accuracy(modifyattn=False, modifyrope=False, scale_score=False)
@@ -70,7 +70,7 @@ report_accuracy(modifyattn=False, modifyrope=False, scale_score=False)
 #     return sum(scores)/len(scores)
 
 
-# def _calculate_accuracy(df, label, use_generation=False):
+# def _calculate_accuracy(df, label, use_generation=True):
 #     answers = [answers for answers in df["answer_lemmas"]]
 #     if use_generation:
 #         generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]
@@ -84,4 +84,4 @@ report_accuracy(modifyattn=False, modifyrope=False, scale_score=False)
 # # baseline_fn = f"{dataset_root}/{ds_name}/{model_name}/baseline_per_prompt.feather"
 # # baseline = pandas.read_feather(baseline_fn)
 # # # baseline["predict_lemma"] = baseline["predict_lemma"].apply(lambda xs: xs[0])
-# # _calculate_accuracy(baseline, "MyriadLlama Baseline Per Prompt", use_generation=False)
+# # _calculate_accuracy(baseline, "MyriadLlama Baseline Per Prompt", use_generation=True)
