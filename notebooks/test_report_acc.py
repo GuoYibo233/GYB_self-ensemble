@@ -6,7 +6,12 @@ import pandas
 from notebooks._utils import report_accuracy_by_nshot
 
 ds_name = "myriadlama"
-dataset_root = "/home/xzhao/workspace/GYB_self-ensemble/datasets"
+import os
+_current_user = os.environ.get('USER', 'unknown')
+if _current_user == 'y-guo':
+    dataset_root = "/home/y-guo/self-ensemble"
+else:
+    dataset_root = "/home/xzhao/workspace/GYB_self-ensemble/datasets"
 
 model_name = "llama3.2_3b_it"
 # model_name = "qwen2.5_3b_it"

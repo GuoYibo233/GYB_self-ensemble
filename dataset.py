@@ -10,9 +10,10 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from constants import MODEL_PATHs
-from datasets import Dataset, load_dataset, load_from_disk
+from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 from utils import DATASET_ROOT, PROJECT_DATASET_ROOT, set_seed
 
+COMMONSENSE_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_commonsense_paraphrase_ds"
 
 def string_to_id(s):
     return hashlib.md5(s.encode()).hexdigest()
@@ -362,3 +363,101 @@ class MyriadLamaDataset(ParaPharaseDataset):
         question = example["manual_paraphrases"][0]
         answer = example["answers"][0]
         return f"Q: {question}\nA: {answer}"
+
+
+class CommonsenseParaphraseDataset(ParaPharaseDataset):
+    """
+    Aggregates paraphrase variants per orig_id from the commonsense QA-style dataset.
+    Each aggregated row contains:
+      - uuid: orig_id
+      - paraphrases: list[str] sorted by paraphrase_idx
+      - answers: [correct_choice_text] (first element is gold)
+      - choices_label / choices_text / answer_label kept for reference
+    """
+
+    def __init__(self, model_name, raw_path: str = COMMONSENSE_PARAPHRASE_PATH):
+        self.model_name = model_name
+        self.raw_dataset_path = raw_path
+        super().__init__("commonsense_paraphrase", model_name)
+
+    @property
+    def dataset_root(self):
+        return os.path.join(PROJECT_DATASET_ROOT, "commonsense_paraphrase", self.model_name)
+
+    @property
+    def dataset_path(self):
+        return os.path.join(self.dataset_root, "paraphrases_dataset")
+
+    @property
+    def instruction(self):
+        return """Multiple-Choice Question Answering
+Your task is to select the correct answer to the question from the given options.
+Consider only the provided options and choose the single most appropriate one.
+
+Output format constraint:
+• Output exactly one capital letter corresponding to the chosen option
+• Do not output punctuation, text, or explanations"""
+
+    def load_dataset(self):
+        if os.path.exists(self.dataset_path):
+            print(f"Dataset already exists at {self.dataset_path}. Loading from disk.")
+            return load_from_disk(self.dataset_path)
+
+        print(f"Loading raw commonsense paraphrase dataset from {self.raw_dataset_path}")
+        raw_ds = load_from_disk(self.raw_dataset_path)
+        if isinstance(raw_ds, DatasetDict):
+            raw_ds = raw_ds["train"]
+        df = raw_ds.to_pandas() 
+
+        items = []
+        for orig_id, sdf in tqdm(df.groupby("orig_id"), desc="Processing commonsense paraphrases", dynamic_ncols=True):
+            sdf = sdf.sort_values("paraphrase_idx")
+            paraphrases = sdf["question"].tolist()
+            first = sdf.iloc[0]
+            labels = first["choices"]["label"]
+            texts = first["choices"]["text"]
+            label2text = {l: t for l, t in zip(labels, texts)}
+            answer_key = first["answerKey"]
+            answer_text = label2text.get(answer_key, "")
+            items.append(
+                {
+                    "uuid": orig_id,
+                    "paraphrases": paraphrases,
+                    "answers": [answer_text],
+                    "answer_label": answer_key,
+                    "choices_label": labels,
+                    "choices_text": texts,
+                    "orig_question": first.get("orig_question", ""),
+                    "question_concept": first.get("question_concept", ""),
+                }
+            )
+
+        agg_ds = Dataset.from_pandas(pd.DataFrame(items))
+        agg_ds.save_to_disk(self.dataset_path)
+        return agg_ds
+
+    def get_dataloader(self, batch_size=8, shuffle=False):
+        return DataLoader(self.ds, batch_size=batch_size, collate_fn=self.collate_fn, shuffle=shuffle)
+
+    def collate_fn(self, batch):
+        uuids = [item["uuid"] for item in batch]
+        answers = [item["answers"] for item in batch]
+        paraphrases = [item["paraphrases"] for item in batch]
+        choices_label = [item["choices_label"] for item in batch]
+        choices_text = [item["choices_text"] for item in batch]
+        answer_label = [item["answer_label"] for item in batch]
+        return uuids, answers, list(zip(*paraphrases)), choices_label, choices_text, answer_label
+
+    def get_few_shot_examples(self, k=5, seed=42):
+        random.seed(seed)
+        indices = random.sample(range(len(self.ds)), k)
+        return "\n\n".join(self.format_example(self.ds[i]) for i in indices)
+
+    def format_example(self, example):
+        question = example["paraphrases"][0]
+        answer_label = example["answer_label"]
+        choices_label = example["choices_label"]
+        choices_text = example["choices_text"]
+        
+        options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_label, choices_text)])
+        return f"Question:\n{question}\n\nOptions:\n{options_str}\n\nAnswer (A–E only): {answer_label}"

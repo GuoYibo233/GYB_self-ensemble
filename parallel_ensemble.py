@@ -119,6 +119,30 @@ def ensemble_generation(
     return generated_texts[0].strip()
 
 
+def construct_multi_choice_prompts(instruction, few_shot_examples, question, choices_label, choices_text):
+    """
+    Construct prompts for multiple-choice questions.
+    
+    Args:
+        instruction: The instruction text for multiple-choice QA
+        few_shot_examples: Few-shot examples string
+        question: The question text
+        choices_label: List of choice labels (e.g., ['A', 'B', 'C', 'D', 'E'])
+        choices_text: List of choice texts
+    
+    Returns:
+        List containing the formatted prompt
+    """
+    options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_label, choices_text)])
+    
+    if few_shot_examples:
+        prompt = f"{instruction}\n\n{few_shot_examples}\n\nQuestion:\n{question}\n\nOptions:\n{options_str}\n\nAnswer (A–E only):"
+    else:
+        prompt = f"{instruction}\n\nQuestion:\n{question}\n\nOptions:\n{options_str}\n\nAnswer (A–E only):"
+    
+    return [prompt]
+
+
 
 def sample_paraphrases_per_item(uuids, all_paraphrases, num_paraphrases, num_samples, repeat_paras=False):
     """
@@ -403,7 +427,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Ensemble generation")
     parser.add_argument("--model", type=str, default="llama3.2_3b_it", help="Path to the pre-trained model.")
-    parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama"], help="Dataset to use for generating paraphrases.")    
+    parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense"], help="Dataset to use for generating paraphrases.")
     parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on (default: cuda).")
     parser.add_argument("--num_paraphrases", type=int, default=5, help="Number of paraphrases to use in each sample (default: 2)")
     parser.add_argument("--num_samples", type=int, default=5, help="Number of different paraphrase combinations to generate per question (default: 5)")
@@ -425,23 +449,27 @@ if __name__ == "__main__":
     parser.add_argument("--rewrite", action="store_true", help="Rewrite existing output files")
     args = parser.parse_args()    
 
-    if args.ensemble_method is None:
-        assert args.multilayer is False, "multilayer option not applicable for logits ensemble"
-
+    flag_multi_choice = False
     if args.dataset == "webqa":
         from dataset import WebQADataset
         dataset = WebQADataset(model_name=args.model)
     elif args.dataset == "myriadlama":
         from dataset import MyriadLamaDataset
         dataset = MyriadLamaDataset(model_name=args.model, debug=args.debug)
+    elif args.dataset == "commonsense":
+        from dataset import CommonsenseParaphraseDataset
+        dataset = CommonsenseParaphraseDataset(model_name=args.model)
+        flag_multi_choice = True
     else:
-        raise ValueError("Unsupported dataset. Please use 'webqa' or 'myriadlama'.")
+        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', or 'commonsense'.")
     
     if args.model not in MODEL_PATHs:
         raise ValueError(f"Model {args.model} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
     model_path = MODEL_PATHs.get(args.model, args.model)
     
-    dump_file = f"{dataset.dataset_root}/myriadlama.logits.{args.logits_ensemble_method}."
+    # Use dataset name for output file prefix
+    dataset_name = getattr(dataset, 'name', None) or getattr(dataset, '__class__', type(dataset)).__name__.replace('Dataset', '').lower()
+    dump_file = f"{dataset.dataset_root}/{dataset_name}.logits.{args.logits_ensemble_method}."
     if args.repeat_paras:
         dump_file += "repeatparas."
     
@@ -467,7 +495,8 @@ if __name__ == "__main__":
     print(f"🔄 Starting {args.logits_ensemble_method} logits ensembling to {dump_file}")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", dtype="auto")
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
+    # model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", dtype="auto")
 
     dataloader = dataset.get_dataloader(batch_size=8, shuffle=False)
     if args.logits_ensemble_method.startswith("weighted_"):
@@ -479,11 +508,31 @@ if __name__ == "__main__":
     
     few_shot_examples = dataset.get_few_shot_examples(k=args.num_fewshots) if args.num_fewshots > 0 else ""
 
-    sample_count = 0
     all_samples = []
-    for uuids, answers, all_paraphrases in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
-        # Use sampling function to select paraphrases
-        # Same uuid will always produce the same sampling results (matching series_ensemble.py)
+
+    uuid_count = 0
+    for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
+        if flag_multi_choice:
+            uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels = batch_data
+        else:
+            uuids, answers, all_paraphrases = batch_data
+            choices_labels = [None] * len(uuids)
+            choices_texts = [None] * len(uuids)
+            answer_labels = [None] * len(uuids)
+
+        # If multi-choice, enforce max_samples as max number of unique uuids (questions)
+        if flag_multi_choice and args.max_samples:
+            if uuid_count >= args.max_samples:
+                break
+            # Only take up to remaining uuids
+            take_n = min(args.max_samples - uuid_count, len(uuids))
+            uuids = uuids[:take_n]
+            answers = answers[:take_n]
+            all_paraphrases = [p[:take_n] for p in all_paraphrases]
+            choices_labels = choices_labels[:take_n]
+            choices_texts = choices_texts[:take_n]
+            answer_labels = answer_labels[:take_n]
+        
         samples = sample_paraphrases_per_item(
             uuids=uuids,
             all_paraphrases=all_paraphrases, 
@@ -492,19 +541,28 @@ if __name__ == "__main__":
             repeat_paras=args.repeat_paras
         )
         
-        sample_count += len(uuids)
         for uuid, sampled_paraphrases in samples:
             idx = uuids.index(uuid)
-            all_samples.append((uuid, answers[idx], sampled_paraphrases))
-        
-        if args.max_samples and len(all_samples) >= args.max_samples:
-            all_samples = all_samples[:args.max_samples]
-            break
+            if flag_multi_choice:
+                all_samples.append((uuid, answers[idx], sampled_paraphrases, 
+                                  choices_labels[idx], choices_texts[idx], answer_labels[idx]))
+            else:
+                all_samples.append((uuid, answers[idx], sampled_paraphrases, None, None, None))
+        if flag_multi_choice and args.max_samples:
+            uuid_count += len(uuids)
     
     print(f"Total samples to process: {len(all_samples)}")
     
     # Process each sample
-    for uuid, answer, sampled_paraphrases in tqdm(all_samples, desc="Generating", dynamic_ncols=True):
+    for sample_data in tqdm(all_samples, desc="Generating", dynamic_ncols=True):
+        if flag_multi_choice:
+            uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label = sample_data
+        else:
+            uuid, answer, sampled_paraphrases, _, _, _ = sample_data
+            choices_label = None
+            choices_text = None
+            answer_label = None
+        
         all_prompts = []
         confidences = [] if args.logits_ensemble_method.startswith("weighted_") else None
         
@@ -518,7 +576,19 @@ if __name__ == "__main__":
                     confidences.append(float(_sdf["confidence"].values[0]))
                 else:
                     confidences.append(1.0)  # Default confidence
-            prompts = dataset.construct_prompts(few_shot_examples, [para])
+            
+            # Use different prompt construction based on dataset type
+            if flag_multi_choice:
+                prompts = construct_multi_choice_prompts(
+                    dataset.instruction, 
+                    few_shot_examples, 
+                    para,
+                    choices_label,
+                    choices_text
+                )
+            else:
+                prompts = dataset.construct_prompts(few_shot_examples, [para])
+            
             all_prompts.append(prompts)
         
         generation = ensemble_generation(
@@ -533,7 +603,14 @@ if __name__ == "__main__":
             ensemble_alpha=args.ensemble_alpha, 
             token_mode=args.token_mode,
             multilayer=args.multilayer)
-        prediction = generation.strip().split()[0] if generation.strip() else ""
+        
+        # Extract prediction - for multi-choice, extract first capital letter
+        if flag_multi_choice:
+            import re
+            match = re.search(r'[A-E]', generation.strip())
+            prediction = match.group(0) if match else ""
+        else:
+            prediction = generation.strip().split()[0] if generation.strip() else ""
         
         items = {
             "uuid": [uuid],
@@ -543,12 +620,14 @@ if __name__ == "__main__":
             "prediction": [prediction],
             "generation": [generation],
         }
+        
+        # Add multi-choice specific fields
+        if flag_multi_choice:
+            items["choices_label"] = [choices_label]
+            items["choices_text"] = [choices_text]
+            items["answer_label"] = [answer_label]
+        
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
-
-        sample_count += len(uuids)
-        if args.max_samples and sample_count >= args.max_samples:
-            print(f"Reached max_samples limit ({args.max_samples}), stopping generation")
-            break
 
     chunks = np.array_split(df, num_parts)
     with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
