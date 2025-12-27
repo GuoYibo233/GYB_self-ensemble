@@ -229,7 +229,7 @@ if __name__ == "__main__":
     print(f"🔄 Output to: {dump_file}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, dtype="auto")
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", dtype="auto")
     tokenizer.pad_token = tokenizer.eos_token
 
     if args.method == "origin":

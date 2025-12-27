@@ -110,7 +110,7 @@ if __name__ == "__main__":
         raise ValueError(f"Model {args.model} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
     model_path = MODEL_PATHs.get(args.model, args.model)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, dtype="auto")
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", dtype="auto")
     tokenizer.pad_token = tokenizer.eos_token
 
     # Do sampling and generation

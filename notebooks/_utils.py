@@ -5,6 +5,25 @@ import pandas
 from utils import partial_match_scores, partial_match_scores_use_generation
 
 
+def get_layers(model: str):
+    model2layers = {
+        "llama3.2_1b": 12,
+        "llama3.2_3b": 21,
+        "llama3.1_8b": 24,
+        "qwen2.5_3b": 27,
+        "qwen2.5_7b": 21,
+        "qwen2.5_14b": 36,
+        "qwen3_4b": 27,
+        "qwen3_30b": 36,
+        "qwen3_235b": 71,
+        "pythia_2.8b": 24,
+    }
+
+    for key in model2layers:
+        if model.startswith(key):
+            return model2layers[key]
+    raise NotImplementedError(f"Layers not defined for model {model}")
+
 def get_parallel_ensemble_filename(
         dump_file_prefix, 
         modifyattn, modifyrope, 
@@ -32,7 +51,7 @@ def get_parallel_ensemble_filename(
     # print(f"Loading from {dump_file}")
     return dump_file
 
-def calculate_accuracy(df, label, use_generation=False):
+def calculate_accuracy(df, label, use_generation=True):
     # answers = [answers for answers in df["answer_lemmas"]]
     answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
     try:
@@ -47,6 +66,18 @@ def calculate_accuracy(df, label, use_generation=False):
     except KeyError as e:
         print(f"KeyError: {e} ==> 🏷️ {label}")
 
+def calculate_baseline_accuracy(dataset_root, model_name, num_fewshots):
+    try:
+        baseline_df = pandas.read_feather(
+            os.path.join(
+                dataset_root, 
+                "myriadlama",
+                model_name, 
+                f"baseline_per_prompt.{num_fewshots}shots.feather")
+            )
+        calculate_accuracy(baseline_df, "baseline")
+    except Exception as e:
+        print(f"Error reading baseline for {model_name} with {num_fewshots} shots: {e}")
     
 def calculate_series_ensemble_accuracy(
         dump_file_prefix,
@@ -78,7 +109,10 @@ def calculate_series_ensemble_accuracy(
     
     if modifyattn is False and modifyrope is False and scale_score == 0 and num_paraphrases == 1:
         label += " (Baseline)"
-    calculate_accuracy(df, label, use_generation=use_generation)
+    try:
+        calculate_accuracy(df, label, use_generation=use_generation)
+    except KeyError as e:
+        print(f"KeyError: {e} ==> 🏷️ {label}")
     return df
 
 def report_series_ensemble_accuracy_by_nparas(
@@ -142,7 +176,7 @@ def calculate_parallel_ensemble_accuracy(
         logits_ensemble_method,
         ensemble_method=None, ensemble_layer=None, 
         multilayer=False, ensemble_alpha=1.0, 
-        token_mode="all", use_generation=False):
+        token_mode="all", use_generation=True):
     filename = get_series_ensemble_filename(
         dump_file_prefix=dump_file_prefix, repeat_paras=repeat_paras, 
         logits_ensemble_method=logits_ensemble_method,

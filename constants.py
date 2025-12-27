@@ -28,7 +28,12 @@ MODEL_PATHs = {
     "qwen2.5_3b_it": "Qwen/Qwen2.5-3B-Instruct",
     "qwen2.5_7b_it": "Qwen/Qwen2.5-7B-Instruct",
     "qwen2.5_14b_it": "Qwen/Qwen2.5-14B-Instruct",
+    "qwen3_0.6b": "Qwen/Qwen3-0.6B",
     "qwen3_1.7b": "Qwen/Qwen3-1.7B",
     "qwen3_4b": "Qwen/Qwen3-4B",
     "qwen3_8b": "Qwen/Qwen3-8B",
+    "qwen3_30b": "Qwen/Qwen3-30B-A3B",
+    "qwen3_235b": "Qwen/Qwen3-235B-A22B",
+    # Pythia Model
+    "pythia_2.8b": "EleutherAI/pythia-2.8b"
 }

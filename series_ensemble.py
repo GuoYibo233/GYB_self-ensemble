@@ -574,7 +574,7 @@ if __name__ == "__main__":
     
     print(f"🔄 Starting generation to {dump_file}")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, dtype="auto")
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", dtype="auto")
     tokenizer.pad_token = tokenizer.eos_token
     has_bos = "llama" in args.model.lower()
 

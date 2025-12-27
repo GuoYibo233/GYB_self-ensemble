@@ -456,7 +456,7 @@ if __name__ == "__main__":
     
     dump_file += f"{args.num_samples}samples.{args.num_paraphrases}paras.feather"
     if os.path.exists(dump_file) and not args.rewrite:
-        print(f"File {dump_file} already exists, skipping generation.")
+        print(f"✅ File {dump_file} already exists, skipping generation.")
         exit(0)
 
     max_new_tokens = 10 if args.num_fewshots > 0 else 30    
@@ -465,7 +465,7 @@ if __name__ == "__main__":
     print(f"🔄 Starting {args.logits_ensemble_method} logits ensembling to {dump_file}")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map=args.device, dtype="auto")
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", dtype="auto")
 
     dataloader = dataset.get_dataloader(batch_size=8, shuffle=False)
     if args.logits_ensemble_method.startswith("weighted_"):
