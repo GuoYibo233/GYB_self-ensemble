@@ -14,6 +14,8 @@ from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 from utils import DATASET_ROOT, PROJECT_DATASET_ROOT, set_seed
 
 COMMONSENSE_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_commonsense_paraphrase_ds"
+MMLA_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_mmlu_paraphrase"
+LOGIQA_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_logiqa_paraphrase"
 
 def string_to_id(s):
     return hashlib.md5(s.encode()).hexdigest()
@@ -365,9 +367,10 @@ class MyriadLamaDataset(ParaPharaseDataset):
         return f"Q: {question}\nA: {answer}"
 
 
-class CommonsenseParaphraseDataset(ParaPharaseDataset):
+class MultiChoiceParaphraseDataset(ParaPharaseDataset):
     """
-    Aggregates paraphrase variants per orig_id from the commonsense QA-style dataset.
+    Base class for multi-choice QA paraphrase datasets.
+    Aggregates paraphrase variants per orig_id.
     Each aggregated row contains:
       - uuid: orig_id
       - paraphrases: list[str] sorted by paraphrase_idx
@@ -375,14 +378,15 @@ class CommonsenseParaphraseDataset(ParaPharaseDataset):
       - choices_label / choices_text / answer_label kept for reference
     """
 
-    def __init__(self, model_name, raw_path: str = COMMONSENSE_PARAPHRASE_PATH):
+    def __init__(self, model_name, raw_path: str, dataset_type: str = "commonsense"):
         self.model_name = model_name
         self.raw_dataset_path = raw_path
-        super().__init__("commonsense_paraphrase", model_name)
+        self.dataset_type = dataset_type
+        super().__init__(f"{dataset_type}_paraphrase", model_name)
 
     @property
     def dataset_root(self):
-        return os.path.join(PROJECT_DATASET_ROOT, "commonsense_paraphrase", self.model_name)
+        return os.path.join(PROJECT_DATASET_ROOT, f"{self.dataset_type}_paraphrase", self.model_name)
 
     @property
     def dataset_path(self):
@@ -403,14 +407,14 @@ Output format constraint:
             print(f"Dataset already exists at {self.dataset_path}. Loading from disk.")
             return load_from_disk(self.dataset_path)
 
-        print(f"Loading raw commonsense paraphrase dataset from {self.raw_dataset_path}")
+        print(f"Loading raw {self.dataset_type} paraphrase dataset from {self.raw_dataset_path}")
         raw_ds = load_from_disk(self.raw_dataset_path)
         if isinstance(raw_ds, DatasetDict):
             raw_ds = raw_ds["train"]
         df = raw_ds.to_pandas() 
 
         items = []
-        for orig_id, sdf in tqdm(df.groupby("orig_id"), desc="Processing commonsense paraphrases", dynamic_ncols=True):
+        for orig_id, sdf in tqdm(df.groupby("orig_id"), desc=f"Processing {self.dataset_type} paraphrases", dynamic_ncols=True):
             sdf = sdf.sort_values("paraphrase_idx")
             paraphrases = sdf["question"].tolist()
             first = sdf.iloc[0]
@@ -461,3 +465,21 @@ Output format constraint:
         
         options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_label, choices_text)])
         return f"Question:\n{question}\n\nOptions:\n{options_str}\n\nAnswer (A–E only): {answer_label}"
+
+
+class CommonsenseParaphraseDataset(MultiChoiceParaphraseDataset):
+    """Commonsense QA paraphrase dataset."""
+    def __init__(self, model_name, raw_path: str = COMMONSENSE_PARAPHRASE_PATH):
+        super().__init__(model_name, raw_path, dataset_type="commonsense")
+
+
+class MMLUParaphraseDataset(MultiChoiceParaphraseDataset):
+    """MMLU (Massive Multitask Language Understanding) paraphrase dataset."""
+    def __init__(self, model_name, raw_path: str = MMLA_PARAPHRASE_PATH):
+        super().__init__(model_name, raw_path, dataset_type="mmlu")
+
+
+class LogiQAParaphraseDataset(MultiChoiceParaphraseDataset):
+    """LogiQA paraphrase dataset."""
+    def __init__(self, model_name, raw_path: str = LOGIQA_PARAPHRASE_PATH):
+        super().__init__(model_name, raw_path, dataset_type="logiqa")

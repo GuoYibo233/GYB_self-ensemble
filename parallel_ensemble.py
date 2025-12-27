@@ -427,7 +427,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Ensemble generation")
     parser.add_argument("--model", type=str, default="llama3.2_3b_it", help="Path to the pre-trained model.")
-    parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense"], help="Dataset to use for generating paraphrases.")
+    parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa"], help="Dataset to use for generating paraphrases.")
     parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on (default: cuda).")
     parser.add_argument("--num_paraphrases", type=int, default=5, help="Number of paraphrases to use in each sample (default: 2)")
     parser.add_argument("--num_samples", type=int, default=5, help="Number of different paraphrase combinations to generate per question (default: 5)")
@@ -460,8 +460,16 @@ if __name__ == "__main__":
         from dataset import CommonsenseParaphraseDataset
         dataset = CommonsenseParaphraseDataset(model_name=args.model)
         flag_multi_choice = True
+    elif args.dataset == "mmlu":
+        from dataset import MMLUParaphraseDataset
+        dataset = MMLUParaphraseDataset(model_name=args.model)
+        flag_multi_choice = True
+    elif args.dataset == "logiqa":
+        from dataset import LogiQAParaphraseDataset
+        dataset = LogiQAParaphraseDataset(model_name=args.model)
+        flag_multi_choice = True
     else:
-        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', or 'commonsense'.")
+        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', or 'logiqa'.")
     
     if args.model not in MODEL_PATHs:
         raise ValueError(f"Model {args.model} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
