@@ -176,13 +176,21 @@ def sample_paraphrases_per_item(uuids, all_paraphrases, num_paraphrases, num_sam
         
         # Generate all possible combinations
         all_indices = list(range(len(item_paraphrases)))
-        assert num_paraphrases <= len(all_indices), "num_paraphrases exceeds available paraphrase versions."
+        # Warn and clamp if requested num_paraphrases exceeds available versions
+        if num_paraphrases > len(all_indices):
+            print(
+                f"⚠️ uuid {uuid}: requested num_paraphrases={num_paraphrases} exceeds available={len(all_indices)};"
+                f" clamping to {len(all_indices)}"
+            )
+            effective_num_paraphrases = len(all_indices)
+        else:
+            effective_num_paraphrases = num_paraphrases
         if repeat_paras:
             # Repeat same paraphrase: [[0,0], [1,1], [2,2], ...]
-            all_sampled_paras = list([[n] * num_paraphrases for n in all_indices])
+            all_sampled_paras = list([[n] * effective_num_paraphrases for n in all_indices])
         else:
             # Use permutations: all ordered selections of num_paraphrases from available paraphrases
-            all_sampled_paras = itertools.permutations(all_indices, num_paraphrases)
+            all_sampled_paras = itertools.permutations(all_indices, effective_num_paraphrases)
         
         # Set random seed based on uuid to ensure deterministic sampling (same as series_ensemble.py)
         random.seed(uuid)
@@ -428,7 +436,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Ensemble generation")
     parser.add_argument("--model", type=str, default="llama3.2_3b_it", help="Path to the pre-trained model.")
-    parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa"], help="Dataset to use for generating paraphrases.")
+    parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa", "hotpot"], help="Dataset to use for generating paraphrases.")
     parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on (default: cuda).")
     parser.add_argument("--num_paraphrases", type=int, default=5, help="Number of paraphrases to use in each sample (default: 2)")
     parser.add_argument("--num_samples", type=int, default=5, help="Number of different paraphrase combinations to generate per question (default: 5)")
@@ -469,8 +477,11 @@ if __name__ == "__main__":
         from dataset import LogiQAParaphraseDataset
         dataset = LogiQAParaphraseDataset(model_name=args.model, debug=args.debug)
         flag_multi_choice = True
+    elif args.dataset == "hotpot":
+        from dataset import HotpotDataset
+        dataset = HotpotDataset(model_name=args.model, debug=args.debug)
     else:
-        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', or 'logiqa'.")
+        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', 'logiqa', or 'hotpot'.")
     
     if args.model not in MODEL_PATHs:
         raise ValueError(f"Model {args.model} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
@@ -494,6 +505,17 @@ if __name__ == "__main__":
         dump_file += f"{args.num_fewshots}fshots."
     
     dump_file += f"{args.num_samples}samples.{args.num_paraphrases}paras.feather"
+    
+    # If user is y-guo, ensure dump_file is saved to /home/y-guo/self-ensemble
+    _current_user = os.environ.get('USER', 'unknown')
+    if _current_user == 'y-guo':
+        if not dump_file.startswith("/home/y-guo/self-ensemble/"):
+            # Extract the relative path from dataset_root and reconstruct
+            dump_file = dump_file.replace(dataset.dataset_root, "/home/y-guo/self-ensemble")
+            if not dump_file.startswith("/home/y-guo/self-ensemble/"):
+                dump_file = "/home/y-guo/self-ensemble/" + os.path.basename(dump_file)
+        print(f"ℹ️  User y-guo detected, saving to: {dump_file}")
+    
     if os.path.exists(dump_file) and not args.rewrite:
         print(f"✅ File {dump_file} already exists, skipping generation.")
         exit(0)
@@ -530,7 +552,7 @@ if __name__ == "__main__":
             answer_labels = [None] * len(uuids)
 
         # If multi-choice, enforce max_samples as max number of unique uuids (questions)
-        if flag_multi_choice and args.max_samples:
+        if args.max_samples:
             if uuid_count >= args.max_samples:
                 break
             # Only take up to remaining uuids
@@ -557,7 +579,7 @@ if __name__ == "__main__":
                                   choices_labels[idx], choices_texts[idx], answer_labels[idx]))
             else:
                 all_samples.append((uuid, answers[idx], sampled_paraphrases, None, None, None))
-        if flag_multi_choice and args.max_samples:
+        if args.max_samples:
             uuid_count += len(uuids)
     
     print(f"Total samples to process: {len(all_samples)}")

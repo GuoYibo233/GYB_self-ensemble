@@ -1,6 +1,7 @@
 import hashlib
 import os
 import random
+import ast
 from abc import abstractmethod
 from pdb import set_trace
 
@@ -16,6 +17,7 @@ from utils import DATASET_ROOT, PROJECT_DATASET_ROOT, set_seed
 COMMONSENSE_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_commonsense_paraphrase"
 MMLA_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_mmlu_paraphrase"
 LOGIQA_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_logiqa_paraphrase"
+HOTPOT_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_hotpot_paraphrase"
 
 def string_to_id(s):
     return hashlib.md5(s.encode()).hexdigest()
@@ -348,8 +350,28 @@ class MyriadLamaDataset(ParaPharaseDataset):
         for item in batch:
             uuid = item["uuid"]
             random.seed(uuid)
-            auto_paras = random.sample(item["auto_paraphrases"], 5)
-            paraphrases.append(item["manual_paraphrases"] + auto_paras)
+            manual_list = item["manual_paraphrases"]
+            auto_list = item["auto_paraphrases"]
+
+            # Select exactly 5 manual + 5 auto paraphrases per item when available
+            if len(manual_list) < 5:
+                print(f"⚠️ MyriadLAMA uuid {uuid}: manual paraphrase count {len(manual_list)} < 5")
+            if len(auto_list) < 5:
+                print(f"⚠️ MyriadLAMA uuid {uuid}: auto paraphrase count {len(auto_list)} < 5")
+
+            manual_sel = (
+                random.sample(manual_list, 5)
+                if len(manual_list) >= 5 else manual_list[:]
+            )
+            auto_sel = (
+                random.sample(auto_list, 5)
+                if len(auto_list) >= 5 else auto_list[:]
+            )
+
+            merged = manual_sel + auto_sel
+            if len(merged) < 10:
+                print(f"⚠️ MyriadLAMA uuid {uuid}: total paraphrases {len(merged)} < 10 (after selection)")
+            paraphrases.append(merged)
         return uuids, answers, list(zip(*paraphrases))
 
     def get_few_shot_examples(self, k=5, seed=42):
@@ -438,8 +460,8 @@ Answer = <one letter>\n\n
             items.append(
                 {
                     "uuid": orig_id,
-                    "paraphrases": paraphrases[:3],
-                    "answers": answer_text,
+                    "paraphrases": paraphrases[:10],
+                    "answers": [answer_text],
                     "answer_label": answer_key,
                     "choices_label": labels,
                     "choices_text": texts,
@@ -447,6 +469,9 @@ Answer = <one letter>\n\n
                     "question_concept": first.get("question_concept", ""),
                 }
             )
+
+            if len(paraphrases) < 10:
+                print(f"⚠️ {self.dataset_type} uuid {orig_id}: paraphrase count {len(paraphrases)} < 10")
 
             if self.debug and cnt >= 100:
                 break
@@ -501,3 +526,151 @@ class LogiQAParaphraseDataset(MultiChoiceParaphraseDataset):
     """LogiQA paraphrase dataset."""
     def __init__(self, model_name, raw_path: str = LOGIQA_PARAPHRASE_PATH, debug=False):
         super().__init__(model_name, raw_path, dataset_type="logiqa", debug=debug)
+
+
+class HotpotDataset(ParaPharaseDataset):
+    """HotpotQA paraphrase dataset: 1 manual + 10 auto paraphrases per uuid."""
+
+    def __init__(self, model_name, debug=False):
+        self.model_name = model_name
+        self.debug = debug
+        if self.debug:
+            print("Debug mode: using a smaller subset of the dataset.")
+            super().__init__("hotpot-debug", model_name)
+        else:
+            super().__init__("hotpot", model_name)
+
+    @property
+    def dataset_root(self):
+        if self.debug:
+            return os.path.join(
+                PROJECT_DATASET_ROOT, "hotpot-debug", self.model_name
+            )
+        else:
+            return os.path.join(PROJECT_DATASET_ROOT, "hotpot", self.model_name)
+
+    @property
+    def dataset_path(self):
+        return os.path.join(self.dataset_root, "paraphrases_dataset")
+
+    @property
+    def instruction(self):
+        return "Answer the question based on the provided context in one or two sentences."
+
+    def load_dataset(self):
+        if os.path.exists(self.dataset_path):
+            print(f"Dataset already exists at {self.dataset_path}. Loading from disk.")
+            return load_from_disk(self.dataset_path)['test']
+
+        print("Loading HotpotQA dataset...")
+        ds = load_from_disk(HOTPOT_PARAPHRASE_PATH)
+        if isinstance(ds, DatasetDict):
+            ds = ds["train"]
+        
+        print(f"Dataset loaded with {len(ds)} items")
+
+        items = []
+        skipped_count = 0
+        
+        for idx in tqdm(range(len(ds)), desc="Processing HotpotQA dataset", dynamic_ncols=True):
+            item = ds[idx]
+            uuid = item['uuid']
+            
+            # Parse answer field - HotpotQA uses 'answer' (singular) not 'answers'
+            raw_answer = item['answer']
+            if isinstance(raw_answer, str):
+                answers = [raw_answer]  # Convert single answer to list
+            elif isinstance(raw_answer, list):
+                answers = raw_answer
+            else:
+                answers = [str(raw_answer)]
+            
+            # Parse question as manual_paraphrases (use original question)
+            raw_question = item['question']
+            if isinstance(raw_question, str):
+                manual_paraphrases = [raw_question]  # Original question is the manual paraphrase
+            elif isinstance(raw_question, list):
+                manual_paraphrases = raw_question[:1]  # Take first if it's a list
+            else:
+                manual_paraphrases = [str(raw_question)]
+            
+            # Parse auto_paraphrases - handle both list and string representations
+            raw_auto = item['auto_paraphrases']
+            if isinstance(raw_auto, str):
+                try:
+                    auto_paraphrases = ast.literal_eval(raw_auto)
+                    if not isinstance(auto_paraphrases, list):
+                        auto_paraphrases = [auto_paraphrases]
+                except Exception as e:
+                    if skipped_count < 5:
+                        print(f"⚠️ Failed to parse auto_paraphrases for uuid {uuid}: {e}")
+                    auto_paraphrases = [raw_auto]
+            elif isinstance(raw_auto, list):
+                auto_paraphrases = raw_auto
+            else:
+                auto_paraphrases = []
+            
+            # Check if paraphrase counts meet requirements
+            if len(manual_paraphrases) < 1 or len(auto_paraphrases) < 10:
+                if skipped_count < 5:  # Only print first 5 to avoid spam
+                    print(f"⚠️ Skipping uuid {uuid}: manual={len(manual_paraphrases)}, auto={len(auto_paraphrases)}")
+                skipped_count += 1
+                continue
+            
+            items.append({
+                "uuid": uuid,
+                "answers": answers,
+                "manual_paraphrases": manual_paraphrases,
+                "auto_paraphrases": auto_paraphrases
+            })
+
+        print(f"✓ Processed {len(items)} items, skipped {skipped_count} items with insufficient paraphrases")
+        
+        if len(items) == 0:
+            raise ValueError("No valid items found in dataset. All items were filtered out.")
+
+        newdf = pd.DataFrame(items)
+        ds = Dataset.from_pandas(newdf)
+        if self.debug:
+            ds = ds.train_test_split(test_size=200, seed=42, shuffle=True)
+        else:
+            ds = ds.train_test_split(test_size=2000, seed=42, shuffle=True)
+        ds.save_to_disk(self.dataset_path)
+        return ds['test']
+
+    def get_dataloader(self, batch_size=8, shuffle=False):
+        return DataLoader(self.ds, batch_size=batch_size, collate_fn=self.collate_fn, shuffle=shuffle)
+
+    def collate_fn(self, batch):
+        uuids = [item["uuid"] for item in batch]
+        answers = [item["answers"] for item in batch]
+        paraphrases = []
+        for item in batch:
+            uuid = item["uuid"]
+            random.seed(uuid)
+            manual_list = item["manual_paraphrases"]
+            auto_list = item["auto_paraphrases"]
+
+            # For HotpotQA: use 1 manual + 10 auto paraphrases per item
+            # Data already filtered during load_dataset, so we can assume valid counts
+            manual_sel = manual_list[:1]
+            auto_sel = random.sample(auto_list, 10)
+
+            merged = manual_sel + auto_sel
+
+            paraphrases.append(merged)
+        return uuids, answers, list(zip(*paraphrases))
+
+    def get_few_shot_examples(self, k=5, seed=42):
+        if not os.path.exists(self.dataset_path):
+            raise FileNotFoundError(f"Dataset not found at {self.dataset_path}. Please run the dataset preparation first.")
+
+        train_ds = load_from_disk(self.dataset_path)['train']
+        random.seed(seed)
+        indices = random.sample(range(len(train_ds)), k)
+        return "\n\n".join(self.format_example(train_ds[i]) for i in indices)
+
+    def format_example(self, example):
+        question = example["manual_paraphrases"][0] if isinstance(example["manual_paraphrases"], list) else example["manual_paraphrases"]
+        answer = example["answers"][0] if isinstance(example["answers"], list) else example["answers"]
+        return f"Q: {question}\nA: {answer}"
