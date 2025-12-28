@@ -35,11 +35,11 @@ for MODEL in $MODELS ; do
     fi
     
     for NUM_FEWSHOTS in 0 5; do
-        # CUDA_VISIBLE_DEVICES=$DEVICE python3 generate_baseline.py \
-        #     --model $MODEL \
-        #     --method per_prompt \
-        #     --dataset myriadlama \
-        #     --num_fewshots $NUM_FEWSHOTS
+        CUDA_VISIBLE_DEVICES=$DEVICE python3 generate_baseline.py \
+            --model $MODEL \
+            --method per_prompt \
+            --dataset myriadlama \
+            --num_fewshots $NUM_FEWSHOTS
 
         CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
             --logits_ensemble_method avg \

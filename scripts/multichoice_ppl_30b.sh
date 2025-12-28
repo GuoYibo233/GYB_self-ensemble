@@ -20,6 +20,7 @@ for DATASET in "commonsense" "mmlu" "logiqa"; do
             exit 1
         fi
 
+        # Baseline
         CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble_perplexity.py \
                 --model $MODEL \
                 --dataset $DATASET \
@@ -27,6 +28,7 @@ for DATASET in "commonsense" "mmlu" "logiqa"; do
                 --num_fewshots $NUM_FEWSHOTS \
                 --is_baseline
 
+        # Ensemble
         CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble_perplexity.py \
                 --model $MODEL \
                 --dataset $DATASET \
