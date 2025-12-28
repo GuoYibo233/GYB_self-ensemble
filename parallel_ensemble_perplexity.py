@@ -193,11 +193,16 @@ if __name__ == "__main__":
     
     # Use dataset name for output file prefix
     dataset_name = getattr(dataset, 'name', None) or getattr(dataset, '__class__', type(dataset)).__name__.replace('Dataset', '').lower()
-    dump_file = f"{dataset.dataset_root}/{dataset_name}.logits.{args.logits_ensemble_method}."
+    dump_file = f"{dataset.dataset_root}/{dataset_name}.ppl.logits.{args.logits_ensemble_method}."
+    
+    if args.is_baseline:
+        dump_file = f"{dataset.dataset_root}/{dataset_name}.ppl.baseline."
+    else:
+        dump_file = f"{dataset.dataset_root}/{dataset_name}.ppl.logits.{args.logits_ensemble_method}."
+    
     if args.repeat_paras:
         dump_file += "repeatparas."
-    if args.is_baseline:
-        dump_file += "baseline."
+    
     else:
         if args.ensemble_method == "layer_output_avg":
             dump_file += f"avglayer.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
