@@ -176,6 +176,7 @@ def sample_paraphrases_per_item(uuids, all_paraphrases, num_paraphrases, num_sam
         
         # Generate all possible combinations
         all_indices = list(range(len(item_paraphrases)))
+        assert num_paraphrases <= len(all_indices), "num_paraphrases exceeds available paraphrase versions."
         if repeat_paras:
             # Repeat same paraphrase: [[0,0], [1,1], [2,2], ...]
             all_sampled_paras = list([[n] * num_paraphrases for n in all_indices])
@@ -458,15 +459,15 @@ if __name__ == "__main__":
         dataset = MyriadLamaDataset(model_name=args.model, debug=args.debug)
     elif args.dataset == "commonsense":
         from dataset import CommonsenseParaphraseDataset
-        dataset = CommonsenseParaphraseDataset(model_name=args.model)
+        dataset = CommonsenseParaphraseDataset(model_name=args.model, debug=args.debug)
         flag_multi_choice = True
     elif args.dataset == "mmlu":
         from dataset import MMLUParaphraseDataset
-        dataset = MMLUParaphraseDataset(model_name=args.model)
+        dataset = MMLUParaphraseDataset(model_name=args.model, debug=args.debug)
         flag_multi_choice = True
     elif args.dataset == "logiqa":
         from dataset import LogiQAParaphraseDataset
-        dataset = LogiQAParaphraseDataset(model_name=args.model)
+        dataset = LogiQAParaphraseDataset(model_name=args.model, debug=args.debug)
         flag_multi_choice = True
     else:
         raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', or 'logiqa'.")

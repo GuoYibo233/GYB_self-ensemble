@@ -37,7 +37,7 @@ nlp = None
 num_parts = 8
 
 
-def generate_baseline_origin(dataset, dataloader, model_path, args):
+def generate_baseline_origin(dataset, dataloader, args):
     """
     Baseline 1: Generate using only original questions.
 
@@ -72,7 +72,7 @@ def generate_baseline_origin(dataset, dataloader, model_path, args):
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
     return df
 
-def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
+def generate_baseline_per_prompt(dataset, dataloader, args):
     """
     Baseline 2: Generate with each paraphrase separately.
 
@@ -86,14 +86,21 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
     )
 
     max_new_tokens = 10 if args.num_fewshots > 0 else 30
-    for uuids, answers, all_paraphrases in tqdm(
-        dataloader, desc="Generating baseline (per_prompt)", dynamic_ncols=True
-    ):
+
+    for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
+        if flag_multi_choice:
+            uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels = batch_data
+        else:
+            uuids, answers, all_paraphrases = batch_data
+        
         preds_in_batch = []
         prompts_in_batch = []
         paraphrases_in_batch = []
         generations_in_batch = []
         predictions_in_batch = []
+        choices_labels_in_batch = []
+        choices_texts_in_batch = []
+        answer_labels_in_batch = []
 
         few_shot_context = dataset.get_few_shot_examples(k=args.num_fewshots)
         for paraphrases in all_paraphrases:
@@ -105,15 +112,32 @@ def generate_baseline_per_prompt(dataset, dataloader, model_path, args):
             preds_in_batch.extend(predictions)
             generations_in_batch.extend(generations)
             predictions_in_batch.extend(predictions)
+            if flag_multi_choice:
+                choices_labels_in_batch.extend(choices_labels)
+                choices_texts_in_batch.extend(choices_texts)
+                answer_labels_in_batch.extend(answer_labels)
 
-        items = {
-            "uuid": uuids * len(all_paraphrases),
-            "answers": answers * len(all_paraphrases),
-            "paraphrase": paraphrases_in_batch,
-            "prompt": prompts_in_batch,
-            "prediction": predictions_in_batch,
-            "generation": generations_in_batch,
-        }
+        if flag_multi_choice:
+            items = {
+                "uuid": uuids * len(all_paraphrases),
+                "answers": answers * len(all_paraphrases),
+                "paraphrase": paraphrases_in_batch,
+                "prompt": prompts_in_batch,
+                "prediction": predictions_in_batch,
+                "generation": generations_in_batch,
+                "choices_label": choices_labels_in_batch,
+                "choices_text": choices_texts_in_batch,
+                "answer_label": answer_labels_in_batch,
+            }
+        else:
+            items = {
+                "uuid": uuids * len(all_paraphrases),
+                "answers": answers * len(all_paraphrases),
+                "paraphrase": paraphrases_in_batch,
+                "prompt": prompts_in_batch,
+                "prediction": predictions_in_batch,
+                "generation": generations_in_batch,
+            }
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
     return df
 
@@ -141,37 +165,12 @@ if __name__ == "__main__":
         """,
     )
     parser.add_argument(
-        "--method",
-        type=str,
-        required=True,
-        choices=["origin", "per_prompt", "all"],
-        help="Baseline method: 'origin' (original questions), 'per_prompt' (each paraphrase), or 'all' (both)",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="llama3.2_3b_it",
-        help="Model name (default: llama3.2_3b_it)",
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        required=True,
-        choices=["webqa", "myriadlama"],
-        help="Dataset: 'webqa' or 'myriadlama'",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="Device to run the model on (default: cuda)",
-    )
-    parser.add_argument(
-        "--num_fewshots",
-        type=int,
-        default=5,
-        help="Number of few-shot examples to use in prompts (default: 5)",
-    )
+        "--method", type=str, required=True, choices=["origin", "per_prompt", "all", "ppl"], 
+        help="Baseline method: 'origin' (original questions), 'per_prompt' (each paraphrase), or 'all' (both)")
+    parser.add_argument("--model", type=str, default="llama3.2_3b_it", help="Model name (default: llama3.2_3b_it)")
+    parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa"], help="Dataset: 'webqa' or 'myriadlama'")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on (default: cuda)")
+    parser.add_argument("--num_fewshots", type=int, default=5, help="Number of few-shot examples to use in prompts (default: 5)")
     parser.add_argument(
         "--rewrite",
         action="store_true",
@@ -186,15 +185,28 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Load dataset
+    flag_multi_choice = False
     if args.dataset == "webqa":
         from dataset import WebQADataset
         dataset = WebQADataset(model_name=args.model)
     elif args.dataset == "myriadlama":
         from dataset import MyriadLamaDataset
         dataset = MyriadLamaDataset(model_name=args.model, debug=args.debug)
+    elif args.dataset == "commonsense":
+        from dataset import CommonsenseParaphraseDataset
+        dataset = CommonsenseParaphraseDataset(model_name=args.model, debug=args.debug)
+        flag_multi_choice = True
+    elif args.dataset == "mmlu":
+        from dataset import MMLUParaphraseDataset
+        dataset = MMLUParaphraseDataset(model_name=args.model, debug=args.debug)
+        flag_multi_choice = True
+    elif args.dataset == "logiqa":
+        from dataset import LogiQAParaphraseDataset
+        dataset = LogiQAParaphraseDataset(model_name=args.model, debug=args.debug)
+        flag_multi_choice = True
     else:
-        raise ValueError("Unsupported dataset. Please use 'webqa' or 'myriadlama'.")
-
+        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', or 'logiqa'.")
+    
     dataloader = dataset.get_dataloader(batch_size=8, shuffle=False)
 
     # Validate model
@@ -219,6 +231,8 @@ if __name__ == "__main__":
         dump_file = f"{dataset.dataset_root}/baseline_origin.{args.num_fewshots}shots.feather"
     elif args.method == "per_prompt":
         dump_file = f"{dataset.dataset_root}/baseline_per_prompt.{args.num_fewshots}shots.feather"
+    elif args.method == "ppl":
+        dump_file = f"{dataset.dataset_root}/baseline_ppl.{args.num_fewshots}shots.feather"
     else:  # args.method == "all"
         raise NotImplementedError("Method 'all' is not implemented in this script.")    
 
@@ -233,9 +247,11 @@ if __name__ == "__main__":
     tokenizer.pad_token = tokenizer.eos_token
 
     if args.method == "origin":
-        df = generate_baseline_origin(dataset, dataloader, model_path, args)
+        df = generate_baseline_origin(dataset, dataloader, args)
     elif args.method == "per_prompt":
-        df = generate_baseline_per_prompt(dataset, dataloader, model_path, args)
+        df = generate_baseline_per_prompt(dataset, dataloader, args)
+    elif args.method == "ppl":
+        df = generate_baseline_ppl(dataset, dataloader, args)
     
     # Lemmaize predictions and answers
     chunks = np.array_split(df, num_parts)

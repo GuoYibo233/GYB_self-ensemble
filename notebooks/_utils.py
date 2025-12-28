@@ -51,20 +51,31 @@ def get_parallel_ensemble_filename(
     # print(f"Loading from {dump_file}")
     return dump_file
 
-def calculate_accuracy(df, label, use_generation=True):
+def calculate_accuracy(df, label, use_generation=True, is_multichoice=False, verbose=True):
     # answers = [answers for answers in df["answer_lemmas"]]
-    answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
-    try:
-        if use_generation:
-            generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]
-            acc = partial_match_scores_use_generation(generations, answers, birdirect=True)
-        else:
-            predicts = df["predict_lemma"].tolist()
-            acc = partial_match_scores(predicts, answers, birdirect=True)
-    
-        print(f"Acc: {acc:.4f} ==> 🏷️ {label}")
-    except KeyError as e:
-        print(f"KeyError: {e} ==> 🏷️ {label}")
+
+    if not is_multichoice:
+        answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
+        try:
+            if use_generation:
+                generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]
+                acc = partial_match_scores_use_generation(generations, answers, birdirect=True)
+            else:
+                predicts = df["predict_lemma"].tolist()
+                acc = partial_match_scores(predicts, answers, birdirect=True)
+
+            if verbose:
+                print(f"Acc: {acc:.4f} ==> 🏷️ {label}")
+        except KeyError as e:
+            print(f"KeyError: {e} ==> 🏷️ {label}")
+    else:
+        answer_labels = df["answer_label"].tolist()
+        predict_labels = df["prediction"].tolist()
+        correct = sum(1 for a, p in zip(answer_labels, predict_labels) if a == p)
+        acc = correct / len(answer_labels)
+        if verbose:
+            print(f"Multichoice Acc: {acc:.4f} ==> 🏷️ {label}")
+    return acc
 
 def calculate_baseline_accuracy(dataset_root, model_name, num_fewshots):
     try:
@@ -75,10 +86,22 @@ def calculate_baseline_accuracy(dataset_root, model_name, num_fewshots):
                 model_name, 
                 f"baseline_per_prompt.{num_fewshots}shots.feather")
             )
-        calculate_accuracy(baseline_df, "baseline")
     except Exception as e:
         print(f"Error reading baseline for {model_name} with {num_fewshots} shots: {e}")
     
+    calculate_accuracy(baseline_df, "baseline of average accuracy per-paraphrase")
+
+    df = baseline_df.copy()
+    cnt = df.groupby("uuid")["uuid"].transform("size")
+    N = cnt.max()  # or choose expected N
+    df = df[cnt == N]
+
+    df["_k"] = df.groupby("uuid").cumcount()
+    subs = [df[df["_k"] == k].drop(columns="_k") for k in range(N)]
+    accs_per_para = [calculate_accuracy(sub, f"baseline of para {k+1}", verbose=False) for k, sub in enumerate(subs)]
+    max_acc = max(accs_per_para)
+    print(f"Acc: {max_acc:.4f} ==> 🏷️ baseline of max accuracy per-paraphrase")
+
 def calculate_series_ensemble_accuracy(
         dump_file_prefix,
         single_para_qapair, explicit_prompts, repeat_paras,

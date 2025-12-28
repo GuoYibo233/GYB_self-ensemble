@@ -1,12 +1,12 @@
+import os
+import random
 import re
 import string
-import torch
-import random 
+
 import numpy as np
-import os
 import pandas as pd
 import spacy
-from tqdm import tqdm
+import torch
 
 # Dynamic path configuration based on current user
 _current_user = os.environ.get('USER', 'unknown')
@@ -98,6 +98,45 @@ def construct_prompts(questions, few_shot_examples, instruction):
     prompts = [f"{instruction}\n\n{few_shot_examples}\n\nQ: {question}\nA:" for question in questions]
     return prompts
 
+def single_generation(model, tokenizer, prompts, max_new_tokens=10):
+    """Generate responses using greedy decoding."""
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    model.generation_config.temperature = None
+    model.generation_config.top_p = None
+    model.generation_config.pad_token_id = tokenizer.eos_token_id
+
+    inputs = tokenizer(
+        prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        padding_side="left",
+        return_attention_mask=True,
+    ).to(model.device)
+
+    generated = None
+
+    for step in range(max_new_tokens):
+        with torch.no_grad():
+            logits = model(
+                inputs["input_ids"], attention_mask=inputs["attention_mask"]
+            ).logits[:, -1, :]
+            next_token = torch.argmax(logits, dim=-1).unsqueeze(1)
+
+        inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token], dim=1)
+        inputs["attention_mask"] = torch.cat(
+            [inputs["attention_mask"], torch.ones_like(next_token)], dim=1
+        )
+        
+        if generated is None:
+            generated = next_token
+        else:
+            generated = torch.cat([generated, next_token], dim=1)
+
+    generated_texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
+    new_generated_texts = [gen.strip() for gen in generated_texts]
+    return new_generated_texts
+
 def multinormal_generation(model, tokenizer, prompts, num_samples):
     inputs = tokenizer(
         prompts, return_tensors="pt", padding=True, padding_side='left',
@@ -164,6 +203,48 @@ def greedy_generation(model, tokenizer, prompts):
     return generated_texts
 
 
+import torch.nn.functional as F
+
+
+def prompt_ppl(model, tokenizer, q_len, prompts):
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    tokenizer.padding_side = "left"
+
+    inputs = tokenizer(
+        prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        return_attention_mask=True,
+    ).to(model.device)
+
+    input_ids = inputs["input_ids"]          # [B, L]
+    attention_mask = inputs["attention_mask"]# [B, L]
+
+    with torch.no_grad():
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+        logits = outputs.logits               # [B, L, V]
+
+    shift_logits = logits[:, q_len-1:-1, :]
+    shift_labels = input_ids[:, q_len:]
+    shift_mask   = attention_mask[:, q_len:]
+
+    log_probs = F.log_softmax(shift_logits, dim=-1)
+    token_log_probs = log_probs.gather(
+        dim=-1,
+        index=shift_labels.unsqueeze(-1)
+    ).squeeze(-1)
+
+    token_log_probs = token_log_probs * shift_mask
+    avg_nll = -token_log_probs.sum(dim=1) / shift_mask.sum(dim=1)
+    ppl = torch.exp(avg_nll)
+    return ppl
+
+
+
 def normalize_answer(s):
     """Lower text and remove punctuation, articles, and extra whitespace."""
     def remove_articles(text):
@@ -199,6 +280,52 @@ def normalize_answer(s):
 #     matches = any([is_match(pred_norm, ans) for ans in answer_norms])
 #     return matches
 
+def take_until_punct_or_space(tokens: list[str]) -> list[str]:
+    """
+    Return the prefix of tokens until the next token is
+    punctuation or whitespace.
+    """
+    result = []
+    for tok in tokens:
+        if tok.isspace() or tok in string.punctuation:
+            continue
+        result.append(tok)
+    return result
+
+# def partial_match_scores(predictions, gold_answers, birdirect=False):
+#     scores = []
+#     for prediction, _gold_answers in zip(predictions, gold_answers):
+#         try:
+#             prediction = prediction.tolist()
+#         except Exception:
+#             assert isinstance(prediction, str)
+#             prediction = [prediction]
+
+#         if len(prediction) == 0:
+#             scores.append(0)
+#             continue
+        
+#         score = partial_match(prediction, _gold_answers, birdirect)        
+#         scores.append(int(score))
+#     return sum(scores)/len(scores)
+
+def partial_match_scores(predictions, gold_answers, birdirect=False):
+    scores = []
+    for prediction, _gold_answers in zip(predictions, gold_answers):
+        score = partial_match(prediction, _gold_answers, birdirect)
+        scores.append(int(score))
+    return sum(scores)/len(scores)
+
+def partial_match_scores_use_generation(predictions, gold_answers, birdirect=False):
+    scores = []
+    for generations, _gold_answers in zip(predictions, gold_answers):
+        generations = take_until_punct_or_space(generations[0])
+        if len(generations) == 0:
+            scores.append(0)
+            continue
+        score = partial_match(generations, _gold_answers, birdirect)
+        scores.append(int(score))
+    return sum(scores)/len(scores)
 
 def is_matched_str(pred_tokens, gold_tokens, birdirectional=True):
     if any(" ".join(gold_tokens) == " ".join(pred_tokens[i:i+len(gold_tokens)]) for i in range(len(pred_tokens))):
@@ -209,10 +336,3 @@ def is_matched_str(pred_tokens, gold_tokens, birdirectional=True):
 
 def partial_match(pred, golds, birdirectional=True):
     return any(is_matched_str(pred, gold, birdirectional) for gold in golds)
-
-def partial_match_scores(predictions, gold_answers, birdirect=False):
-    scores = []
-    for prediction, _gold_answers in zip(predictions, gold_answers):
-        score = partial_match(prediction, _gold_answers, birdirect)
-        scores.append(int(score))
-    return sum(scores)/len(scores)

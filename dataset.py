@@ -13,7 +13,7 @@ from constants import MODEL_PATHs
 from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 from utils import DATASET_ROOT, PROJECT_DATASET_ROOT, set_seed
 
-COMMONSENSE_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_commonsense_paraphrase_ds"
+COMMONSENSE_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_commonsense_paraphrase"
 MMLA_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_mmlu_paraphrase"
 LOGIQA_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_logiqa_paraphrase"
 
@@ -378,29 +378,41 @@ class MultiChoiceParaphraseDataset(ParaPharaseDataset):
       - choices_label / choices_text / answer_label kept for reference
     """
 
-    def __init__(self, model_name, raw_path: str, dataset_type: str = "commonsense"):
+    def __init__(self, model_name, raw_path: str, dataset_type: str = "commonsense", debug=False):
         self.model_name = model_name
         self.raw_dataset_path = raw_path
         self.dataset_type = dataset_type
-        super().__init__(f"{dataset_type}_paraphrase", model_name)
+        self.debug = debug
+        if self.debug:
+            super().__init__(f"{dataset_type}_paraphrase", model_name)
+        else:
+            super().__init__(f"{dataset_type}_paraphrase-debug", model_name)
 
     @property
     def dataset_root(self):
+        if self.debug:
+            return os.path.join(PROJECT_DATASET_ROOT, f"{self.dataset_type}_paraphrase-debug", self.model_name)
         return os.path.join(PROJECT_DATASET_ROOT, f"{self.dataset_type}_paraphrase", self.model_name)
 
     @property
     def dataset_path(self):
         return os.path.join(self.dataset_root, "paraphrases_dataset")
 
+#     @property
+#     def instruction(self):
+#         return """Answer the following multiple-choice question by selecting the correct option (A, B, C, D, or E).
+# Output exactly one capital letter corresponding to the chosen option. Do not output punctuation, text, or explanations"""
+
     @property
     def instruction(self):
-        return """Multiple-Choice Question Answering
-Your task is to select the correct answer to the question from the given options.
-Consider only the provided options and choose the single most appropriate one.
+        return """You are given a multiple-choice question.
+Choose the correct answer from {A, B, C, D, E}.
+Return ONLY one capital letter from {A, B, C, D, E}.
+Do NOT output anything else.
 
-Output format constraint:
-• Output exactly one capital letter corresponding to the chosen option
-• Do not output punctuation, text, or explanations"""
+Final answer format:
+Answer = <one letter>\n\n
+"""
 
     def load_dataset(self):
         if os.path.exists(self.dataset_path):
@@ -412,9 +424,9 @@ Output format constraint:
         if isinstance(raw_ds, DatasetDict):
             raw_ds = raw_ds["train"]
         df = raw_ds.to_pandas() 
-
+        
         items = []
-        for orig_id, sdf in tqdm(df.groupby("orig_id"), desc=f"Processing {self.dataset_type} paraphrases", dynamic_ncols=True):
+        for cnt, (orig_id, sdf) in tqdm(enumerate(df.groupby("orig_id")), desc=f"Processing {self.dataset_type} paraphrases", dynamic_ncols=True):
             sdf = sdf.sort_values("paraphrase_idx")
             paraphrases = sdf["question"].tolist()
             first = sdf.iloc[0]
@@ -426,8 +438,8 @@ Output format constraint:
             items.append(
                 {
                     "uuid": orig_id,
-                    "paraphrases": paraphrases,
-                    "answers": [answer_text],
+                    "paraphrases": paraphrases[:3],
+                    "answers": answer_text,
                     "answer_label": answer_key,
                     "choices_label": labels,
                     "choices_text": texts,
@@ -435,6 +447,9 @@ Output format constraint:
                     "question_concept": first.get("question_concept", ""),
                 }
             )
+
+            if self.debug and cnt >= 100:
+                break
 
         agg_ds = Dataset.from_pandas(pd.DataFrame(items))
         agg_ds.save_to_disk(self.dataset_path)
@@ -452,34 +467,37 @@ Output format constraint:
         answer_label = [item["answer_label"] for item in batch]
         return uuids, answers, list(zip(*paraphrases)), choices_label, choices_text, answer_label
 
-    def get_few_shot_examples(self, k=5, seed=42):
+    def get_few_shot_examples(self, k=5, seed=42, is_ppl_format=False):
         random.seed(seed)
         indices = random.sample(range(len(self.ds)), k)
-        return "\n\n".join(self.format_example(self.ds[i]) for i in indices)
+        return "\n\n".join(self.format_example(self.ds[i], is_ppl_format=is_ppl_format) for i in indices)
 
-    def format_example(self, example):
+    def format_example(self, example, is_ppl_format=False):
         question = example["paraphrases"][0]
         answer_label = example["answer_label"]
         choices_label = example["choices_label"]
         choices_text = example["choices_text"]
         
-        options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_label, choices_text)])
-        return f"Question:\n{question}\n\nOptions:\n{options_str}\n\nAnswer (A–E only): {answer_label}"
+        if is_ppl_format:
+            return f"Q: {question}\nA: {choices_text[choices_label.index(answer_label)]}"
+        else:
+            options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_label, choices_text)])
+            return f"Question:\n{question}\n\nOptions:\n{options_str}\n\nAnswer = {answer_label}"
 
 
 class CommonsenseParaphraseDataset(MultiChoiceParaphraseDataset):
     """Commonsense QA paraphrase dataset."""
-    def __init__(self, model_name, raw_path: str = COMMONSENSE_PARAPHRASE_PATH):
-        super().__init__(model_name, raw_path, dataset_type="commonsense")
+    def __init__(self, model_name, raw_path: str = COMMONSENSE_PARAPHRASE_PATH, debug=False):
+        super().__init__(model_name, raw_path, dataset_type="commonsense", debug=debug)
 
 
 class MMLUParaphraseDataset(MultiChoiceParaphraseDataset):
     """MMLU (Massive Multitask Language Understanding) paraphrase dataset."""
-    def __init__(self, model_name, raw_path: str = MMLA_PARAPHRASE_PATH):
-        super().__init__(model_name, raw_path, dataset_type="mmlu")
+    def __init__(self, model_name, raw_path: str = MMLA_PARAPHRASE_PATH, debug=False):
+        super().__init__(model_name, raw_path, dataset_type="mmlu", debug=debug)
 
 
 class LogiQAParaphraseDataset(MultiChoiceParaphraseDataset):
     """LogiQA paraphrase dataset."""
-    def __init__(self, model_name, raw_path: str = LOGIQA_PARAPHRASE_PATH):
-        super().__init__(model_name, raw_path, dataset_type="logiqa")
+    def __init__(self, model_name, raw_path: str = LOGIQA_PARAPHRASE_PATH, debug=False):
+        super().__init__(model_name, raw_path, dataset_type="logiqa", debug=debug)
