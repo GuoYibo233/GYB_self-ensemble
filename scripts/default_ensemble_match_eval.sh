@@ -2,6 +2,7 @@
 
 DEVICE=$1
 NUM_FEWSHOTS=$2
+DATASET=${3:-"myriadlama"} # TODO: Support other datasets, including commonsense, mmlu, logiqa, hotpotqa
 echo "Running baseline methods on device $DEVICE with $NUM_FEWSHOTS few-shots."
 
 
@@ -38,13 +39,13 @@ for MODEL in $MODELS ; do
         CUDA_VISIBLE_DEVICES=$DEVICE python3 generate_baseline.py \
             --model $MODEL \
             --method per_prompt \
-            --dataset myriadlama \
+            --dataset $DATASET \
             --num_fewshots $NUM_FEWSHOTS
 
         CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
             --logits_ensemble_method avg \
             --model $MODEL \
-            --dataset myriadlama \
+            --dataset $DATASET \
             --num_paraphrases 5 \
             --num_fewshots $NUM_FEWSHOTS \
             --num_samples 5 \
