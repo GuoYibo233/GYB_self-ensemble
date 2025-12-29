@@ -37,7 +37,7 @@ for MODEL in $MODELS ; do
             --logits_ensemble_method avg \
             --ensemble_method layer_output_avg \
             --ensemble_layer $LAYER \
-            --ensemble_alpha 0.2 \
+            --ensemble_alpha 1 \
             --token_mode all \
             --multilayer
 done

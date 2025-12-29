@@ -200,10 +200,6 @@ if __name__ == "__main__":
     else:
         dump_file = f"{dataset.dataset_root}/{dataset_name}.ppl.logits.{args.logits_ensemble_method}."
     
-    if args.repeat_paras:
-        dump_file += "repeatparas."
-    
-    else:
         if args.ensemble_method == "layer_output_avg":
             dump_file += f"avglayer.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
         elif args.ensemble_method == "ffn_activation_avg":
@@ -212,9 +208,12 @@ if __name__ == "__main__":
             dump_file += f"maxffn.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
         if args.multilayer:
             dump_file += "multilayer."
+        
+    if args.repeat_paras:
+        dump_file += "repeatparas."
     if args.num_fewshots != 5:
         dump_file += f"{args.num_fewshots}fshots."
-
+        
     dump_file += f"{args.num_paraphrases}paras.feather"
     if os.path.exists(dump_file) and not args.rewrite:
         print(f"✅ File {dump_file} already exists, skipping generation.")
