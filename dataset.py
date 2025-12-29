@@ -308,7 +308,7 @@ class MyriadLamaDataset(ParaPharaseDataset):
     def load_dataset(self):
         if os.path.exists(self.dataset_path):
             print(f"Dataset already exists at {self.dataset_path}. Loading from disk.")
-            return load_from_disk(self.dataset_path)['test']
+            return load_from_disk(self.dataset_path)
 
         print("Creating MyriadLAMA dataset...")
         ds = load_dataset("iszhaoxin/MyriadLAMA", split="train")
@@ -333,12 +333,8 @@ class MyriadLamaDataset(ParaPharaseDataset):
 
         newdf = pd.DataFrame(items)
         ds = Dataset.from_pandas(newdf)
-        if self.debug:
-            ds = ds.train_test_split(test_size=200, seed=42, shuffle=True)
-        else:
-            ds = ds.train_test_split(test_size=2000, seed=42, shuffle=True)
         ds.save_to_disk(self.dataset_path)
-        return ds['test']
+        return ds
 
     def get_dataloader(self, batch_size=8, shuffle=False):
         return DataLoader(self.ds, batch_size=batch_size, collate_fn=self.collate_fn, shuffle=shuffle)
@@ -378,10 +374,10 @@ class MyriadLamaDataset(ParaPharaseDataset):
         if not os.path.exists(self.dataset_path):
             raise FileNotFoundError(f"Dataset not found at {self.dataset_path}. Please run the dataset preparation first.")
 
-        train_ds = load_from_disk(self.dataset_path)['train']
+        full_ds = load_from_disk(self.dataset_path)
         random.seed(seed)
-        indices = random.sample(range(len(train_ds)), k)
-        return "\n\n".join(self.format_example(train_ds[i]) for i in indices)
+        indices = random.sample(range(len(full_ds)), k)
+        return "\n\n".join(self.format_example(full_ds[i]) for i in indices)
 
     def format_example(self, example):
         question = example["manual_paraphrases"][0]
@@ -560,7 +556,7 @@ class HotpotDataset(ParaPharaseDataset):
     def load_dataset(self):
         if os.path.exists(self.dataset_path):
             print(f"Dataset already exists at {self.dataset_path}. Loading from disk.")
-            return load_from_disk(self.dataset_path)['test']
+            return load_from_disk(self.dataset_path)
 
         print("Loading HotpotQA dataset...")
         ds = load_from_disk(HOTPOT_PARAPHRASE_PATH)
@@ -631,12 +627,8 @@ class HotpotDataset(ParaPharaseDataset):
 
         newdf = pd.DataFrame(items)
         ds = Dataset.from_pandas(newdf)
-        if self.debug:
-            ds = ds.train_test_split(test_size=200, seed=42, shuffle=True)
-        else:
-            ds = ds.train_test_split(test_size=2000, seed=42, shuffle=True)
         ds.save_to_disk(self.dataset_path)
-        return ds['test']
+        return ds
 
     def get_dataloader(self, batch_size=8, shuffle=False):
         return DataLoader(self.ds, batch_size=batch_size, collate_fn=self.collate_fn, shuffle=shuffle)
@@ -665,10 +657,10 @@ class HotpotDataset(ParaPharaseDataset):
         if not os.path.exists(self.dataset_path):
             raise FileNotFoundError(f"Dataset not found at {self.dataset_path}. Please run the dataset preparation first.")
 
-        train_ds = load_from_disk(self.dataset_path)['train']
+        full_ds = load_from_disk(self.dataset_path)
         random.seed(seed)
-        indices = random.sample(range(len(train_ds)), k)
-        return "\n\n".join(self.format_example(train_ds[i]) for i in indices)
+        indices = random.sample(range(len(full_ds)), k)
+        return "\n\n".join(self.format_example(full_ds[i]) for i in indices)
 
     def format_example(self, example):
         question = example["manual_paraphrases"][0] if isinstance(example["manual_paraphrases"], list) else example["manual_paraphrases"]
