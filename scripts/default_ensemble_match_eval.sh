@@ -3,11 +3,12 @@
 DEVICE=$1
 NUM_FEWSHOTS=$2
 DATASET=${3:-"myriadlama"} # TODO: Support other datasets, including commonsense, mmlu, logiqa, hotpotqa
+# MODEL=${4:-"qwen3_30b"}
 echo "Running baseline methods on device $DEVICE with $NUM_FEWSHOTS few-shots."
 
 
-MODELS="llama3.2_3b qwen2.5_3b qwen3_4b pythia_2.8b qwen3_30b"
-
+# MODELS="llama3.2_3b qwen2.5_3b qwen3_4b pythia_2.8b qwen3_30b"
+MODELS="qwen3_30b"
 for MODEL in $MODELS ; do
 
     if [ "$MODEL" == "llama3.2_1b" ] || [ "$MODEL" == "llama3.2_1b_it" ]; then

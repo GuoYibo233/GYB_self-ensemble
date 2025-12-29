@@ -20,8 +20,6 @@ Usage:
 import multiprocessing as mp
 import os
 import warnings
-from pdb import set_trace
-from tkinter import NO
 
 import numpy as np
 import pandas as pd
@@ -168,7 +166,7 @@ if __name__ == "__main__":
         "--method", type=str, required=True, choices=["origin", "per_prompt", "all", "ppl"], 
         help="Baseline method: 'origin' (original questions), 'per_prompt' (each paraphrase), or 'all' (both)")
     parser.add_argument("--model", type=str, default="llama3.2_3b_it", help="Model name (default: llama3.2_3b_it)")
-    parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa"], help="Dataset: 'webqa' or 'myriadlama'")
+    parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa", "hotpot"], help="Dataset: 'webqa' or 'myriadlama'")
     parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on (default: cuda)")
     parser.add_argument("--num_fewshots", type=int, default=5, help="Number of few-shot examples to use in prompts (default: 5)")
     parser.add_argument(
@@ -204,6 +202,9 @@ if __name__ == "__main__":
         from dataset import LogiQAParaphraseDataset
         dataset = LogiQAParaphraseDataset(model_name=args.model, debug=args.debug)
         flag_multi_choice = True
+    elif args.dataset == "hotpot":
+        from dataset import HotpotDataset
+        dataset = HotpotDataset(model_name=args.model, debug=args.debug)
     else:
         raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', or 'logiqa'.")
     
@@ -250,8 +251,6 @@ if __name__ == "__main__":
         df = generate_baseline_origin(dataset, dataloader, args)
     elif args.method == "per_prompt":
         df = generate_baseline_per_prompt(dataset, dataloader, args)
-    elif args.method == "ppl":
-        df = generate_baseline_ppl(dataset, dataloader, args)
     
     # Lemmaize predictions and answers
     chunks = np.array_split(df, num_parts)
