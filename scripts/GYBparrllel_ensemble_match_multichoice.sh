@@ -1,17 +1,46 @@
 #!/bin/bash
 
-NUM_FEWSHOTS=$1
-DATASETS=${2:-"commonsense mmlu logiqa"} # TODO: Support other datasets, including commonsense, mmlu, logiqa, hotpotqa
-echo "Running baseline methods with $NUM_FEWSHOTS few-shots."
+# 切换到脚本所在目录的上级目录（GYB_self-ensemble）
+cd "$(dirname "$0")/.." || exit 1
 
-MODELS="llama3.2_3b qwen2.5_3b qwen3_4b pythia_2.8b qwen3_30b llama3.2_3b_it qwen2.5_3b_it"
+NUM_FEWSHOTS=${1:-5}
+DATASETS=${2:-"hotpot"} # TODO: Support other datasets, including commonsense, mmlu, logiqa, hotpotqa
+echo "Running baseline methods with $NUM_FEWSHOTS few-shots."
+echo "Working directory: $(pwd)"
+
+MODELS="llama3.2_3b qwen2.5_3b qwen3_4b pythia_2.8b qwen3_30b" 
+#MODELS="qwen3_30b"
 
 # 收集所有任务
 TASKS=()
 for MODEL in $MODELS ; do
     for DATASET in $DATASETS; do
         for FEWSHOTS in 0 5; do
-            TASKS+=("$MODEL|$DATASET|$FEWSHOTS")
+            if [ "$MODEL" == "llama3.2_1b" ] || [ "$MODEL" == "llama3.2_1b_it" ]; then
+        LAYER=12
+    elif [ "$MODEL" == "llama3.2_3b" ] || [ "$MODEL" == "llama3.2_3b_it" ]; then
+        LAYER=21
+    elif [ "$MODEL" == "llama3.1_8b" ] || [ "$MODEL" == "llama3.1_8b_it" ]; then
+        LAYER=24
+    elif [ "$MODEL" == "qwen2.5_3b" ] || [ "$MODEL" == "qwen2.5_3b_it" ]; then
+        LAYER=27
+    elif [ "$MODEL" == "qwen2.5_7b" ] || [ "$MODEL" == "qwen2.5_7b_it" ]; then
+        LAYER=21
+    elif [ "$MODEL" == "qwen2.5_14b" ] || [ "$MODEL" == "qwen2.5_14b_it" ]; then
+        LAYER=36
+    elif [ "$MODEL" == "qwen3_4b" ]; then
+        LAYER=27
+    elif [ "$MODEL" == "qwen3_30b" ]; then
+        LAYER=36
+    elif [ "$MODEL" == "qwen3_235b" ]; then
+        LAYER=71
+    elif [ "$MODEL" == "pythia_2.8b" ]; then
+        LAYER=24
+    else
+        echo "Unknown MODEL: $MODEL"
+        exit 1
+    fi
+            TASKS+=("$MODEL|$DATASET|$FEWSHOTS|$LAYER")
         done
     done
 done
@@ -25,16 +54,17 @@ run_task_group() {
     local tasks=("$@")
     
     for task in "${tasks[@]}"; do
-        IFS='|' read -r MODEL DATASET FEWSHOTS <<< "$task"
-        echo "GPU $device: Running $MODEL on $DATASET with $FEWSHOTS few-shots"
-        CUDA_VISIBLE_DEVICES=$device python3 '/home/y-guo/self-ensemble/GYB_self-ensemble/parallel_ensemble.py' \
-            --logits_ensemble_method avg \
+        IFS='|' read -r MODEL DATASET FEWSHOTS LAYER <<< "$task"
+        echo "GPU $device: Running $MODEL on $DATASET with $FEWSHOTS few-shots (Layer $LAYER)"
+        CUDA_VISIBLE_DEVICES=$device python3 parallel_ensemble.py \
+            --ensemble_method layer_output_avg \
             --model $MODEL \
             --dataset $DATASET \
             --num_paraphrases 5 \
             --num_fewshots $FEWSHOTS \
-            --num_samples 5 \
-            --token_mode last
+            --num_samples 1 \
+            --token_mode last \
+            --ensemble_layer $LAYER
     done
 }
 
