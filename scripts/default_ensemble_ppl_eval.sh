@@ -38,6 +38,6 @@ for MODEL in $MODELS ; do
             --ensemble_method layer_output_avg \
             --ensemble_layer $LAYER \
             --ensemble_alpha 1 \
-            --token_mode all \
+            --token_mode last \
             --multilayer
 done
