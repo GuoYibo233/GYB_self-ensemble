@@ -610,7 +610,6 @@ if __name__ == "__main__":
             choice_labels=dataset.choice_labels)
         
         labels, label_probs = zip(*label_probs) if label_probs else ([], [])
-        set_trace()
         # Extract prediction - for multi-choice, extract first capital letter
         if dataset.is_multi_choice:
             import re

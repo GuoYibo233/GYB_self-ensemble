@@ -346,10 +346,42 @@ def partial_match_scores(predictions, gold_answers, birdirect=False):
         scores.append(int(score))
     return scores
 
-def partial_match_scores_use_generation(predictions, gold_answers, birdirect=False):
+def is_list_of_str(generations):
+    if not isinstance(generations, list):
+        raise ValueError(f"generations should be a list, got {type(generations)}")
+    for generation in generations:
+        if not isinstance(generation, list):
+            raise ValueError(f"each generation should be a list, got {type(generation)}")
+        for lemma in generation:
+            if not isinstance(lemma, str):
+                raise ValueError(f"each lemma should be a str, got {type(lemma)}")
+            
+def _get_first_unspace_lemma(generation):
+    assert isinstance(generation, list), f"generation should be a list of lemmas, got {generation} with type {type(generation)}"
+    if isinstance(generation[0], str):
+        for lemma in generation:
+            if lemma.strip() != "":
+                return lemma.strip()
+    elif isinstance(generation[0], list):
+        assert len(generation) == 1, f"generation should be a list of lemmas with only one generation, got {generation} with length {len(generation)}"
+        for lemma in generation[0]:
+            if lemma.strip() != "":
+                return lemma.strip()
+    else:
+        raise ValueError(f"generation[0] should be either str or list, got {generation[0]} with type {type(generation[0])}")
+    return ""
+
+
+def partial_match_scores_use_generation(
+        predictions, gold_answers, 
+        birdirect=False, is_multichoice=False):
     scores = []
     for generations, _gold_answers in zip(predictions, gold_answers):
-        generations_ = take_until_punct_or_space(generations[0])
+        is_list_of_str(generations)
+        if is_multichoice:
+            generations_ = _get_first_unspace_lemma(generations[0])
+        else:
+            generations_ = take_until_punct_or_space(generations[0])
         if len(generations_) == 0:
             scores.append(0)
             continue

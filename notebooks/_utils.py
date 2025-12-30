@@ -1,7 +1,9 @@
 import os
+from pdb import set_trace
 
+import numpy as np
 import pandas
-from numpy import argmax
+from numpy import argmax, isin
 
 from utils import partial_match_scores, partial_match_scores_use_generation
 
@@ -52,7 +54,7 @@ def get_series_ensemble_filename(
     # print(f"Loading from {dump_file}")
     return dump_file
 
-def calculate_accuracy(df, label, use_generation=True, by_probs=False, verbose=True):
+def calculate_accuracy(df, label, is_multichoice, use_generation=True, by_probs=False, verbose=True):
     """
     by_probs: whether to calculate accuracy based on label probabilities (for multi-choice tasks)
     use_generation: whether to use generation_lemmas (True) or predict_lemma (False)
@@ -63,8 +65,8 @@ def calculate_accuracy(df, label, use_generation=True, by_probs=False, verbose=T
         answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
         try:
             if use_generation:
-                generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]    
-                scores = partial_match_scores_use_generation(generations, answers, birdirect=True)
+                generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]
+                scores = partial_match_scores_use_generation(generations, answers, birdirect=True, is_multichoice=is_multichoice)
             else:
                 predicts = df["predict_lemma"].tolist()
                 scores = partial_match_scores(predicts, answers, birdirect=True)
@@ -76,7 +78,7 @@ def calculate_accuracy(df, label, use_generation=True, by_probs=False, verbose=T
             print(f"KeyError: {e} ==> 🏷️ {label}")
     else:
         labels = df['labels'].tolist()[0]
-        assert isinstance(labels, list) and len(labels) > 0, "labels should be a list of label strings and not empty."
+        assert isinstance(labels, list) or isinstance(labels, np.ndarray) and len(labels) > 0, f"labels should be a list of label strings and not empty: got {labels} with type {type(labels)}"
         pred_labels = [labels[argmax(probs).item()].strip() for probs in df['label_probs'].tolist()]
         scores = [pred == answer for pred, answer in zip(pred_labels, df['answer_label'].tolist())]
         df["correct"] = scores
@@ -113,6 +115,8 @@ def calculate_accuracy(df, label, use_generation=True, by_probs=False, verbose=T
 #     return acc
 
 def _read_per_prompt_dataframe(dataset_root, ds_name, model_name, num_fewshots):
+    # filename = os.path.join(dataset_root,  ds_name, model_name, f"baseline_per_prompt.{num_fewshots}shots.feather")
+    # print(f"Reading baseline per-prompt dataframe from {filename}")
     try:
         baseline_df = pandas.read_feather(
             os.path.join(
@@ -123,20 +127,22 @@ def _read_per_prompt_dataframe(dataset_root, ds_name, model_name, num_fewshots):
         print(f"FileNotFoundError: {e}")
         return None
 
-def calculate_baseline_accuracy(dataset_root, ds_name, model_name, num_fewshots, by_probs=False):
+def calculate_baseline_accuracy(dataset_root, ds_name, model_name, num_fewshots, is_multichoice=False, by_probs=False):
     baseline_df = _read_per_prompt_dataframe(
         dataset_root, ds_name, model_name, num_fewshots)
     if baseline_df is None:
         return None
-    calculate_accuracy(baseline_df, "baseline of average accuracy per-paraphrase", by_probs=by_probs)
+    calculate_accuracy(
+        baseline_df, "baseline of average accuracy per-paraphrase", 
+        by_probs=by_probs, is_multichoice=is_multichoice)
 
-def calculate_oracle_accuracy(dataset_root, ds_name, model_name, num_fewshots, by_probs=False):
+def calculate_oracle_accuracy(dataset_root, ds_name, model_name, num_fewshots, is_multichoice=False, by_probs=False):
     baseline_df = _read_per_prompt_dataframe(
         dataset_root, ds_name, model_name, num_fewshots)
     if baseline_df is None:
         return None
     
-    calculate_accuracy(baseline_df, "", verbose=False, by_probs=by_probs)
+    calculate_accuracy(baseline_df, "", verbose=False, by_probs=by_probs, is_multichoice=is_multichoice)
     
     scores = []
     for uuid, gdf in baseline_df.groupby('uuid'):
@@ -242,7 +248,8 @@ def calculate_parallel_ensemble_accuracy(
         logits_ensemble_method,
         ensemble_method=None, ensemble_layer=None, 
         multilayer=False, ensemble_alpha=1.0, 
-        token_mode="all", use_generation=True, by_probs=False):
+        token_mode="all", use_generation=True, 
+        by_probs=False, is_multichoice=False):
     filename = get_parallel_ensemble_filename(
         dump_file_prefix=dump_file_prefix, repeat_paras=repeat_paras, 
         logits_ensemble_method=logits_ensemble_method,
@@ -266,5 +273,5 @@ def calculate_parallel_ensemble_accuracy(
     label += f"{'Multilayer' if multilayer else ''} "
     label += f"alpha{ensemble_alpha} token-{token_mode}"
     
-    calculate_accuracy(df, label, use_generation=use_generation, by_probs=by_probs)
+    calculate_accuracy(df, label, use_generation=use_generation, by_probs=by_probs, is_multichoice=is_multichoice)
     return df
