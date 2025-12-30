@@ -57,12 +57,13 @@ def calculate_accuracy(df, label, use_generation=True, is_multichoice=False, ver
         answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
         try:
             if use_generation:
-                generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]
-                acc = partial_match_scores_use_generation(generations, answers, birdirect=True)
+                generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]    
+                scores = partial_match_scores_use_generation(generations, answers, birdirect=True)
             else:
                 predicts = df["predict_lemma"].tolist()
-                acc = partial_match_scores(predicts, answers, birdirect=True)
-
+                scores = partial_match_scores(predicts, answers, birdirect=True)
+            df["correct"] = scores
+            acc = sum(scores)/len(scores)
             if verbose:
                 print(f"Acc: {acc:.4f} ==> 🏷️ {label}")
         except KeyError as e:
@@ -70,8 +71,9 @@ def calculate_accuracy(df, label, use_generation=True, is_multichoice=False, ver
     else:
         answer_labels = df["answer_label"].tolist()
         predict_labels = df["prediction"].tolist()
-        correct = sum(1 for a, p in zip(answer_labels, predict_labels) if a == p)
-        acc = correct / len(answer_labels)
+        scores = [1 if a == p else 0 for a, p in zip(answer_labels, predict_labels)]
+        df["correct"] = scores
+        acc = sum(scores)/len(scores)
         if verbose:
             print(f"Multichoice Acc: {acc:.4f} ==> 🏷️ {label}")
     return acc
@@ -94,17 +96,29 @@ def calculate_baseline_accuracy(dataset_root, ds_name, model_name, num_fewshots)
     
     calculate_accuracy(baseline_df, "baseline of average accuracy per-paraphrase")
 
-    df = baseline_df.copy()
-    cnt = df.groupby("uuid")["uuid"].transform("size")
-    N = cnt.max()  # or choose expected N
-    df = df[cnt == N]
-
-    df["_k"] = df.groupby("uuid").cumcount()
-    subs = [df[df["_k"] == k].drop(columns="_k") for k in range(N)]
-    accs_per_para = [calculate_accuracy(sub, f"baseline of para {k+1}", verbose=False) for k, sub in enumerate(subs)]
-    max_acc = max(accs_per_para)
-    print(f"Acc: {max_acc:.4f} ==> 🏷️ baseline of max accuracy per-paraphrase")
-
+def calculate_oracle_accuracy(dataset_root, ds_name, model_name, num_fewshots):
+    try:
+        if ds_name == "myriadlama":
+            baseline_df = pandas.read_feather(
+                os.path.join(
+                    dataset_root,  "myriadlama", model_name, 
+                    f"baseline_per_prompt.{num_fewshots}shots.feather"))
+        else:
+            baseline_df = pandas.read_feather(
+                os.path.join(
+                    dataset_root, f"{ds_name}_paraphrase", model_name, 
+                    f"baseline_per_prompt.{num_fewshots}shots.feather"))
+    except FileNotFoundError as e:
+        print(f"FileNotFoundError: {e}")
+        return None
+    
+    calculate_accuracy(baseline_df, "", verbose=False)
+    scores = []
+    for uuid, gdf in baseline_df.groupby('uuid'):
+        scores.append(gdf['correct'].sum() > 0)
+    oracle_acc = sum(scores)/len(scores)
+    print(f"Acc: {oracle_acc:.4f} ==> 🏷️ Oracle accuracy per-paraphrase")
+        
 def calculate_series_ensemble_accuracy(
         dump_file_prefix,
         single_para_qapair, explicit_prompts, repeat_paras,
