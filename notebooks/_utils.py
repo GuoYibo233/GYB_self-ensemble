@@ -184,7 +184,7 @@ def calculate_series_ensemble_accuracy(
     if modifyattn is False and modifyrope is False and scale_score == 0 and num_paraphrases == 1:
         label += " (Baseline)"
     try:
-        calculate_accuracy(df, label, use_generation=use_generation)
+        calculate_accuracy(df, label, use_generation=use_generation, is_multichoice=False, by_probs=False)
     except KeyError as e:
         print(f"KeyError: {e} ==> 🏷️ {label}")
     return df
@@ -201,7 +201,7 @@ def report_series_ensemble_accuracy_by_nparas(
             dump_file_prefix=dump_file_prefix, 
             single_para_qapair=single_para_qapair, explicit_prompts=explicit_prompts, repeat_paras=repeat_paras, 
             modifyattn=modifyattn, modifyrope=modifyrope, scale_score=scale_score, 
-            num_paraphrases=num_paraphrases, num_fewshots=num_fewshots)
+            num_paraphrases=num_paraphrases, num_fewshots=num_fewshots, num_samples=5)
     
 def report_series_ensemble_accuracy_by_nshot(
         dump_file_prefix, 
