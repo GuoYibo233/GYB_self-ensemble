@@ -1,6 +1,7 @@
 import os
 
 import pandas
+from numpy import argmax
 
 from utils import partial_match_scores, partial_match_scores_use_generation
 
@@ -51,9 +52,9 @@ def get_parallel_ensemble_filename(
     # print(f"Loading from {dump_file}")
     return dump_file
 
-def calculate_accuracy(df, label, use_generation=True, is_multichoice=False, verbose=True):
+def calculate_accuracy(df, label, use_generation=True, by_probs=False, verbose=True):
     # answers = [answers for answers in df["answer_lemmas"]]
-    if not is_multichoice:
+    if not by_probs:
         answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
         try:
             if use_generation:
@@ -69,50 +70,75 @@ def calculate_accuracy(df, label, use_generation=True, is_multichoice=False, ver
         except KeyError as e:
             print(f"KeyError: {e} ==> 🏷️ {label}")
     else:
-        answer_labels = df["answer_label"].tolist()
-        predict_labels = df["prediction"].tolist()
-        scores = [1 if a == p else 0 for a, p in zip(answer_labels, predict_labels)]
-        df["correct"] = scores
-        acc = sum(scores)/len(scores)
+        labels = df['labels'].tolist()[0]
+        pred_labels = [labels[argmax(probs).item()].strip() for probs in df['label_probs'].tolist()]
+        acc = sum([pred == answer for pred, answer in zip(pred_labels, df['answer_label'].tolist())])/len(df)
         if verbose:
             print(f"Multichoice Acc: {acc:.4f} ==> 🏷️ {label}")
     return acc
 
-def calculate_baseline_accuracy(dataset_root, ds_name, model_name, num_fewshots):
+# def calculate_accuracy(df, label, use_generation=True, is_multichoice=False, verbose=True):
+#     # answers = [answers for answers in df["answer_lemmas"]]
+#     if not is_multichoice:
+#         answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
+#         try:
+#             if use_generation:
+#                 generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]    
+#                 scores = partial_match_scores_use_generation(generations, answers, birdirect=True)
+#             else:
+#                 predicts = df["predict_lemma"].tolist()
+#                 scores = partial_match_scores(predicts, answers, birdirect=True)
+#             df["correct"] = scores
+#             acc = sum(scores)/len(scores)
+#             if verbose:
+#                 print(f"Acc: {acc:.4f} ==> 🏷️ {label}")
+#         except KeyError as e:
+#             print(f"KeyError: {e} ==> 🏷️ {label}")
+#     else:
+#         answer_labels = df["answer_label"].tolist()
+#         predict_labels = df["prediction"].tolist()
+#         scores = [1 if a == p else 0 for a, p in zip(answer_labels, predict_labels)]
+#         df["correct"] = scores
+#         acc = sum(scores)/len(scores)
+#         if verbose:
+#             print(f"Multichoice Acc: {acc:.4f} ==> 🏷️ {label}")
+#     return acc
+
+def _read_per_prompt_dataframe(dataset_root, ds_name, model_name, num_fewshots):
     try:
-        if ds_name == "myriadlama":
+        if ds_name in ["myriadlama", "hotpot"]:
             baseline_df = pandas.read_feather(
                 os.path.join(
-                    dataset_root,  "myriadlama", model_name, 
+                    dataset_root,  ds_name, model_name, 
                     f"baseline_per_prompt.{num_fewshots}shots.feather"))
-        else:
+        elif ds_name in ["commonsense", "mmlu", "logiqa"]:
             baseline_df = pandas.read_feather(
                 os.path.join(
                     dataset_root, f"{ds_name}_paraphrase", model_name, 
                     f"baseline_per_prompt.{num_fewshots}shots.feather"))
+        else:
+            raise ValueError(f"Unsupported dataset {ds_name} for oracle accuracy calculation.")
+        return baseline_df    
     except FileNotFoundError as e:
         print(f"FileNotFoundError: {e}")
         return None
     
+
+def calculate_baseline_accuracy(dataset_root, ds_name, model_name, num_fewshots):
+    baseline_df = _read_per_prompt_dataframe(
+        dataset_root, ds_name, model_name, num_fewshots)
+    if baseline_df is None:
+        return None
     calculate_accuracy(baseline_df, "baseline of average accuracy per-paraphrase")
 
 def calculate_oracle_accuracy(dataset_root, ds_name, model_name, num_fewshots):
-    try:
-        if ds_name == "myriadlama":
-            baseline_df = pandas.read_feather(
-                os.path.join(
-                    dataset_root,  "myriadlama", model_name, 
-                    f"baseline_per_prompt.{num_fewshots}shots.feather"))
-        else:
-            baseline_df = pandas.read_feather(
-                os.path.join(
-                    dataset_root, f"{ds_name}_paraphrase", model_name, 
-                    f"baseline_per_prompt.{num_fewshots}shots.feather"))
-    except FileNotFoundError as e:
-        print(f"FileNotFoundError: {e}")
+    baseline_df = _read_per_prompt_dataframe(
+        dataset_root, ds_name, model_name, num_fewshots)
+    if baseline_df is None:
         return None
     
     calculate_accuracy(baseline_df, "", verbose=False)
+    
     scores = []
     for uuid, gdf in baseline_df.groupby('uuid'):
         scores.append(gdf['correct'].sum() > 0)

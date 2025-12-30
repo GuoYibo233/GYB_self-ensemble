@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
 
+import paraphrase
 from constants import MODEL_PATHs
 from parallel_ensemble import (
     _get_blocks,
@@ -21,12 +22,6 @@ from parallel_ensemble import (
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
 num_parts = 8
-
-def construct_perplexity_prompt(question, choice, few_shot_context=""):
-    instruction = "Answer the given question.\n"
-    if choice is None:
-         return instruction + f"{few_shot_context}\n\nQ: {question}\nA:"
-    return instruction + f"{few_shot_context}\n\nQ: {question}\nA: {choice}"
 
 def get_ensemble_logits(model, inputs, ensemble_method, integration_method, weights, layer_indices, ensemble_alpha, token_mode):
     if inputs["input_ids"].size(0) == 1:
@@ -75,7 +70,8 @@ def measure_per_token_perplexity(
     model,
     tokenizer,
     paraphrases: list[str], 
-    choices: list[str],
+    choices_labels: list[str],
+    choices_texts: list[str],
     few_shot_context: str,
     integration_method="max", 
     weights=None, 
@@ -97,8 +93,15 @@ def measure_per_token_perplexity(
     model.generation_config.top_p = None
     model.generation_config.pad_token_id = tokenizer.eos_token_id
 
-    paraphrases = [paraphrase for paraphrase in paraphrases]
-    qonly_prompts = [construct_perplexity_prompt(paraphrase, choice=None, few_shot_context=few_shot_context) for paraphrase in paraphrases]
+    qonly_prompts = [
+        dataset.construct_multi_choice_prompts(
+            few_shot_examples=few_shot_context, 
+            paraphrases=[paraphrase],
+            choices_labels=choices_labels,
+            choices_texts=choices_texts,
+        )[0]
+        for paraphrase in paraphrases]
+    
     qonly_inputs = tokenizer(
         qonly_prompts, return_tensors="pt", 
         padding=True, truncation=True,
@@ -106,10 +109,10 @@ def measure_per_token_perplexity(
     qonly_len = qonly_inputs["input_ids"].size(1)
     
     choice_ppls = []
-    for choice in choices:
+    for choice in choices_labels:
         qchoice_prompts = [
-            construct_perplexity_prompt(paraphrase, choice, few_shot_context=few_shot_context) 
-            for paraphrase in paraphrases
+            qonly_prompt + choice
+            for qonly_prompt in qonly_prompts
         ]
         
         qchoice_inputs = tokenizer(
@@ -118,7 +121,8 @@ def measure_per_token_perplexity(
             return_attention_mask=True).to(model.device)
         
         choice_len = qchoice_inputs["input_ids"].size(1) - qonly_len
-
+        assert choice_len == 1, "Currently only support single-token choices."
+        
         all_ids, all_logits = [], []
         for idx in range(choice_len):
             inputs = BatchEncoding({
@@ -232,25 +236,26 @@ if __name__ == "__main__":
 
     df = pd.DataFrame(columns=["uuid", "answers", "prediction", "generation"])
     
-    few_shot_context = dataset.get_few_shot_examples(k=args.num_fewshots, is_ppl_format=True) if args.num_fewshots > 0 else ""
+    few_shot_context = dataset.get_few_shot_examples(k=args.num_fewshots) if args.num_fewshots > 0 else ""
     all_samples = []
 
     uuid_count = 0
     for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
-        uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels = batch_data
+        uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels, all_is_origs = batch_data
         len(all_paraphrases) >= 3, 'Each question must have at least 3 paraphrases.'
         
         samples = sample_paraphrases_per_item(
             uuids=uuids,
             all_paraphrases=all_paraphrases, 
+            all_is_origs=all_is_origs,
             num_paraphrases=args.num_paraphrases, 
             num_samples=1,
             repeat_paras=args.repeat_paras
         )
         
-        for uuid, sampled_paraphrases in samples:
+        for uuid, sampled_paraphrases, sampled_is_origs in samples:
             idx = uuids.index(uuid)
-            all_samples.append((uuid, answers[idx], sampled_paraphrases, 
+            all_samples.append((uuid, answers[idx], sampled_paraphrases, sampled_is_origs,
                                 choices_labels[idx], choices_texts[idx], answer_labels[idx]))
         uuid_count += len(uuids)
     
@@ -269,46 +274,45 @@ if __name__ == "__main__":
 
     def _get_iter():
         if args.is_baseline:
-            for uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label in \
+            for uuid, answer, sampled_paraphrases, sampled_is_origs, choices_labels, choices_texts, answer_label in \
                 tqdm(all_samples, desc="Generating", dynamic_ncols=True):
-                for paraphrase in sampled_paraphrases:
-                    qonly_prompts, qchoice_prompts, ppls = measure_per_token_perplexity_partial(paraphrases=[paraphrase], choices=choices_text, few_shot_context=few_shot_context)
-                    yield uuid, answer, [paraphrase], choices_label, choices_text, answer_label, ppls, qonly_prompts, qchoice_prompts
+                for paraphrase, is_orig in zip(sampled_paraphrases, sampled_is_origs):
+                    qonly_prompts, qchoice_prompts, ppls = measure_per_token_perplexity_partial(
+                        paraphrases=[paraphrase], 
+                        choices_labels=choices_labels, 
+                        choices_texts=choices_texts, 
+                        few_shot_context=few_shot_context)
+                    yield uuid, answer, [paraphrase], [is_orig], choices_labels, choices_texts, answer_label, ppls, qonly_prompts, qchoice_prompts
         else:
-            for uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label in \
+            for uuid, answer, sampled_paraphrases, sampled_is_origs, choices_labels, choices_texts, answer_label in \
                 tqdm(all_samples, desc="Generating", dynamic_ncols=True):
-                qonly_prompts, qchoice_prompts, ppls = measure_per_token_perplexity_partial(paraphrases=sampled_paraphrases, choices=choices_text, few_shot_context=few_shot_context)
-                yield uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label, ppls, qonly_prompts, qchoice_prompts
+                qonly_prompts, qchoice_prompts, ppls = \
+                    measure_per_token_perplexity_partial(
+                        paraphrases=sampled_paraphrases, 
+                        choices_labels=choices_labels,
+                        choices_texts=choices_texts,
+                        few_shot_context=few_shot_context)
+                yield uuid, answer, sampled_paraphrases, sampled_is_origs, choices_labels, choices_texts, answer_label, ppls, qonly_prompts, qchoice_prompts
     
-    for uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label, \
+    for uuid, answer, sampled_paraphrases, sampled_is_origs, choices_labels, choices_texts, answer_label, \
         ppls, qonly_prompts, qchoice_prompts in _get_iter():
         items = {
             "uuid": [uuid],
             "qonly_prompts": [qonly_prompts],
             "qchoice_prompts": [qchoice_prompts],
             "paraphrases": [sampled_paraphrases],
+            "is_origs": [sampled_is_origs],
             "answers": [answer],
             "ppls": [ppls],
-            "best_choice_idx": [choices_text[ppls.argmin()]],
+            "best_choice_idx": [choices_texts[ppls.argmin()]],
             "prediction": ["ABCDEF"[ppls.argmin()]],
             "generation": ["ABCDEF"[ppls.argmin()]],
         }
         
-        items["choices_label"] = [choices_label]
-        items["choices_text"] = [choices_text]
+        items["choices_labels"] = [choices_labels]
+        items["choices_texts"] = [choices_texts]
         items["answer_label"] = [answer_label]
     
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
 
     df.to_feather(dump_file)
-    # chunks = np.array_split(df, num_parts)
-    # with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
-    #     results = pool.map(lemmaize_chunk, chunks)
-    # try:
-    #     df = append_lemmas(df, results)
-    # except Exception as e:
-    #     print(f"❌ Lemmatization failed: {type(e).__name__}: {e}")
-    #     set_trace()
-    # finally:
-    #     df.to_feather(dump_file)
-    #     print(f"✅ Results saved to {dump_file}")

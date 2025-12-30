@@ -2,12 +2,12 @@ import os
 import random
 import re
 import string
+from pdb import set_trace
 
 import numpy as np
 import pandas as pd
 import spacy
 import torch
-from tqdm import tqdm
 
 # Dynamic path configuration based on current user
 _current_user = os.environ.get('USER', 'unknown')
@@ -95,7 +95,23 @@ def get_few_shot_examples(dataset, k=5, seed=42):
     indices = random.sample(range(len(dataset)), k)
     return "\n\n".join(format_example(dataset[i]) for i in indices)
 
-def single_generation(model, tokenizer, prompts, max_new_tokens=10):
+def get_label_prob(tokenizer, logits, choice_labels):
+    """Get the probabilities of choice labels [A, B, C, D, E]"""
+    probs = logits.softmax(dim=-1)
+    label_probs = []
+    for label in choice_labels:
+        label_id = tokenizer.encode(label, add_special_tokens=False)
+        assert len(label_id) == 1, "Choice labels should be single tokens."
+        if len(logits.shape) == 1:
+            label_logit = probs[label_id[0]].cpu().item()
+            label_probs.append((label, label_logit))
+        elif len(logits.shape) == 2:
+            ### Batch size > 1
+            batch_label_probs = probs[:, label_id[0]].cpu().tolist()
+            label_probs.append((label, batch_label_probs))
+    return label_probs
+
+def single_generation(model, tokenizer, prompts, choice_labels=None, max_new_tokens=10):
     """Generate responses using greedy decoding."""
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model.generation_config.temperature = None
@@ -119,7 +135,7 @@ def single_generation(model, tokenizer, prompts, max_new_tokens=10):
     generated = torch.empty((bsz, max_new_tokens), dtype=input_ids.dtype, device=input_ids.device)
 
     past_key_values = None
-
+    label_probs = None
     with torch.inference_mode():
         out = model(
             input_ids=input_ids,
@@ -143,10 +159,13 @@ def single_generation(model, tokenizer, prompts, max_new_tokens=10):
             )
             logits = out.logits[:, -1, :]
             past_key_values = out.past_key_values
+
+            if choice_labels is not None and step == 0:
+                label_probs = get_label_prob(tokenizer, logits, choice_labels)
     
     generated_texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
     new_generated_texts = [gen.strip() for gen in generated_texts]
-    return new_generated_texts
+    return new_generated_texts, label_probs
 
 def multinormal_generation(model, tokenizer, prompts, num_samples):
     inputs = tokenizer(
@@ -325,7 +344,7 @@ def partial_match_scores(predictions, gold_answers, birdirect=False):
     for prediction, _gold_answers in zip(predictions, gold_answers):
         score = partial_match(prediction, _gold_answers, birdirect)
         scores.append(int(score))
-    return sum(scores)/len(scores)
+    return scores
 
 def partial_match_scores_use_generation(predictions, gold_answers, birdirect=False):
     scores = []
@@ -336,7 +355,7 @@ def partial_match_scores_use_generation(predictions, gold_answers, birdirect=Fal
             continue
         score = partial_match(generations_, _gold_answers, birdirect)
         scores.append(int(score))
-    return sum(scores)/len(scores)
+    return scores
 
 def is_matched_str(pred_tokens, gold_tokens, birdirectional=True):
     if any(" ".join(gold_tokens) == " ".join(pred_tokens[i:i+len(gold_tokens)]) for i in range(len(pred_tokens))):

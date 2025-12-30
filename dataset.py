@@ -1,4 +1,3 @@
-import ast
 import hashlib
 import os
 import random
@@ -135,6 +134,14 @@ class ParaPharaseDataset:
     def instruction(self):
         pass
 
+    @property
+    def choice_labels(self):
+        return None
+
+    @property
+    def is_multi_choice(self):
+        return False
+
     @abstractmethod
     def load_dataset(self):
         pass
@@ -151,6 +158,7 @@ class ParaPharaseDataset:
     def get_few_shot_examples(self, k=5, seed=42):
         pass
 
+    
     def format_example(self, example):
         question = example["question"]
         answer = example["answers"][0]
@@ -347,6 +355,7 @@ class MyriadLamaDataset(ParaPharaseDataset):
         uuids = [item["uuid"] for item in batch]
         answers = [item["answers"] for item in batch]
         paraphrases = []
+        is_origs = []
         for item in batch:
             uuid = item["uuid"]
             random.seed(uuid)
@@ -372,7 +381,8 @@ class MyriadLamaDataset(ParaPharaseDataset):
             if len(merged) < 10:
                 print(f"⚠️ MyriadLAMA uuid {uuid}: total paraphrases {len(merged)} < 10 (after selection)")
             paraphrases.append(merged)
-        return uuids, answers, list(zip(*paraphrases))
+            is_origs.append([True]*5 + [False]*5)
+        return uuids, answers, list(zip(*paraphrases)), list(zip(*is_origs))
 
     def get_few_shot_examples(self, k=5, seed=42):
         if not os.path.exists(self.dataset_path):
@@ -406,19 +416,23 @@ class MultiChoiceParaphraseDataset(ParaPharaseDataset):
         self.dataset_type = dataset_type
         self.debug = debug
         if self.debug:
-            super().__init__(f"{dataset_type}_paraphrase", model_name)
+            super().__init__(f"{dataset_type}", model_name)
         else:
-            super().__init__(f"{dataset_type}_paraphrase-debug", model_name)
+            super().__init__(f"{dataset_type}-debug", model_name)
 
     @property
     def dataset_root(self):
         if self.debug:
-            return os.path.join(PROJECT_DATASET_ROOT, f"{self.dataset_type}_paraphrase-debug", self.model_name)
-        return os.path.join(PROJECT_DATASET_ROOT, f"{self.dataset_type}_paraphrase", self.model_name)
+            return os.path.join(PROJECT_DATASET_ROOT, f"{self.dataset_type}-debug", self.model_name)
+        return os.path.join(PROJECT_DATASET_ROOT, f"{self.dataset_type}", self.model_name)
 
     @property
     def dataset_path(self):
         return os.path.join(self.dataset_root, "paraphrases_dataset")
+
+    @property
+    def is_multi_choice(self):
+        return True
 
 #     @property
 #     def instruction(self):
@@ -452,9 +466,9 @@ Answer = <one letter>
         prompts = []
         for paraphrase in paraphrases:
             if few_shot_examples:
-                prompt = f"{self.instruction}\n\n{few_shot_examples}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\nAnswer = "
+                prompt = f"{self.instruction}\n\n{few_shot_examples}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\nAnswer ="
             else:
-                prompt = f"{self.instruction}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\nAnswer = "
+                prompt = f"{self.instruction}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\nAnswer ="
             prompts.append(prompt)
         return prompts
     
@@ -477,25 +491,23 @@ Answer = <one letter>
             first = sdf.iloc[0]
             labels = first["choices"]["label"]
             texts = first["choices"]["text"]
-            label2text = {l: t for l, t in zip(labels, texts)}
+            label2text = {label: text for label, text in zip(labels, texts)}
             answer_key = first["answerKey"]
             answer_text = label2text.get(answer_key, "")
+            orig_question = first.get("orig_question", "")
             items.append(
                 {
                     "uuid": orig_id,
-                    "paraphrases": paraphrases[:10],
+                    "paraphrases": [orig_question] + paraphrases[:4],
+                    "is_orig": [True] + [False]*4,
                     "answers": [answer_text],
                     "answer_label": answer_key,
                     "choices_label": labels,
                     "choices_text": texts,
-                    "orig_question": first.get("orig_question", ""),
+                    "orig_question": orig_question,
                     "question_concept": first.get("question_concept", ""),
                 }
             )
-
-            if len(paraphrases) < 10:
-                print(f"⚠️ {self.dataset_type} uuid {orig_id}: paraphrase count {len(paraphrases)} < 10")
-
             if self.debug and cnt >= 100:
                 break
 
@@ -509,11 +521,15 @@ Answer = <one letter>
     def collate_fn(self, batch):
         uuids = [item["uuid"] for item in batch]
         # answers = [item["answers"] for item in batch]
-        paraphrases = [item["paraphrases"] for item in batch]
         choices_labels = [item["choices_label"] for item in batch]
         choices_texts = [item["choices_text"] for item in batch]
         answer_labels = [item["answer_label"] for item in batch]
-        return uuids, answer_labels, list(zip(*paraphrases)), choices_labels, choices_texts, answer_labels
+        is_origs = [item["is_orig"] for item in batch]
+        paraphrases = []
+        for item in batch:
+            assert len(item["paraphrases"]) == 5, f"⚠️ {self.dataset_type} uuid {item['uuid']}: paraphrase count {len(item['paraphrases'])} != 5"
+            paraphrases.append(item["paraphrases"])
+        return uuids, answer_labels, list(zip(*paraphrases)), choices_labels, choices_texts, answer_labels, list((zip(*is_origs)))
 
     def get_few_shot_examples(self, k=5, seed=42, is_ppl_format=False):
         random.seed(seed)
@@ -538,18 +554,27 @@ class CommonsenseParaphraseDataset(MultiChoiceParaphraseDataset):
     def __init__(self, model_name, raw_path: str = COMMONSENSE_PARAPHRASE_PATH, debug=False):
         super().__init__(model_name, raw_path, dataset_type="commonsense", debug=debug)
 
+    @property
+    def choice_labels(self):
+        return [' A', ' B', ' C', ' D', ' E']
 
 class MMLUParaphraseDataset(MultiChoiceParaphraseDataset):
     """MMLU (Massive Multitask Language Understanding) paraphrase dataset."""
     def __init__(self, model_name, raw_path: str = MMLA_PARAPHRASE_PATH, debug=False):
         super().__init__(model_name, raw_path, dataset_type="mmlu", debug=debug)
 
+    @property
+    def choice_labels(self):
+        return [' A', ' B', ' C', ' D']
 
 class LogiQAParaphraseDataset(MultiChoiceParaphraseDataset):
     """LogiQA paraphrase dataset."""
     def __init__(self, model_name, raw_path: str = LOGIQA_PARAPHRASE_PATH, debug=False):
         super().__init__(model_name, raw_path, dataset_type="logiqa", debug=debug)
 
+    @property
+    def choice_labels(self):
+        return [' A', ' B', ' C', ' D']
 
 class HotpotDataset(ParaPharaseDataset):
     """HotpotQA paraphrase dataset: 1 manual + 10 auto paraphrases per uuid."""
@@ -593,7 +618,6 @@ class HotpotDataset(ParaPharaseDataset):
         print(f"Dataset loaded with {len(ds)} items")
 
         items = []
-        skipped_count = 0
         
         for idx in tqdm(range(len(ds)), desc="Processing HotpotQA dataset", dynamic_ncols=True):
             item = ds[idx]
@@ -618,28 +642,8 @@ class HotpotDataset(ParaPharaseDataset):
                 manual_paraphrases = [str(raw_question)]
             
             # Parse auto_paraphrases - handle both list and string representations
-            raw_auto = item['auto_paraphrases']
-            if isinstance(raw_auto, str):
-                try:
-                    auto_paraphrases = ast.literal_eval(raw_auto)
-                    if not isinstance(auto_paraphrases, list):
-                        auto_paraphrases = [auto_paraphrases]
-                except Exception as e:
-                    if skipped_count < 5:
-                        print(f"⚠️ Failed to parse auto_paraphrases for uuid {uuid}: {e}")
-                    auto_paraphrases = [raw_auto]
-            elif isinstance(raw_auto, list):
-                auto_paraphrases = raw_auto
-            else:
-                auto_paraphrases = []
-            
-            # Check if paraphrase counts meet requirements
-            if len(manual_paraphrases) < 1 or len(auto_paraphrases) < 10:
-                if skipped_count < 5:  # Only print first 5 to avoid spam
-                    print(f"⚠️ Skipping uuid {uuid}: manual={len(manual_paraphrases)}, auto={len(auto_paraphrases)}")
-                skipped_count += 1
-                continue
-            
+            assert isinstance(item['auto_paraphrases'], list), f"Expected list for auto_paraphrases, got {type(item['auto_paraphrases'])}"
+            auto_paraphrases = item['auto_paraphrases'][:4]
             items.append({
                 "uuid": uuid,
                 "answers": answers,
@@ -650,7 +654,7 @@ class HotpotDataset(ParaPharaseDataset):
             if self.debug and idx >= 100:
                 break
 
-        print(f"✓ Processed {len(items)} items, skipped {skipped_count} items with insufficient paraphrases")
+        print(f"✓ Processed {len(items)} items")
         
         if len(items) == 0:
             raise ValueError("No valid items found in dataset. All items were filtered out.")
@@ -667,21 +671,17 @@ class HotpotDataset(ParaPharaseDataset):
         uuids = [item["uuid"] for item in batch]
         answers = [item["answers"] for item in batch]
         paraphrases = []
+        is_orgs = []
         for item in batch:
             uuid = item["uuid"]
             random.seed(uuid)
             manual_list = item["manual_paraphrases"]
             auto_list = item["auto_paraphrases"]
-
-            # For HotpotQA: use 1 manual + 10 auto paraphrases per item
-            # Data already filtered during load_dataset, so we can assume valid counts
-            manual_sel = manual_list[:1]
-            auto_sel = random.sample(auto_list, 10)
-
-            merged = manual_sel + auto_sel
-
+            merged = manual_list + auto_list
+            assert len(merged) == 5, f"⚠️ Hotpot uuid {uuid}: total paraphrases {len(merged)} != 5"
             paraphrases.append(merged)
-        return uuids, answers, list(zip(*paraphrases))
+            is_orgs.append([True] + [False]*4)
+        return uuids, answers, list(zip(*paraphrases)), list(zip(*is_orgs))
 
     def get_few_shot_examples(self, k=5, seed=42):
         if not os.path.exists(self.dataset_path):

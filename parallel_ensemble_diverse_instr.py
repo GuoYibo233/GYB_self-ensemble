@@ -123,7 +123,7 @@ if __name__ == "__main__":
     if args.logits_ensemble_method.startswith("weighted_"):
         conf_df = pd.read_feather(os.path.join(dataset.dataset_root, "confidence.feather"))
 
-    df = pd.DataFrame(columns=["uuid", "answers", "prediction", "generation","correctness"])
+    df = pd.DataFrame(columns=["uuid", "answers", "prediction", "generation"])
     few_shot_examples = dataset.get_few_shot_examples(k=args.num_fewshots) if args.num_fewshots > 0 else ""
 
     sample_count = 0

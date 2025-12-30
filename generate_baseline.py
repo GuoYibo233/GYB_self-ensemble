@@ -87,55 +87,70 @@ def generate_baseline_per_prompt(dataset, dataloader, args):
     max_new_tokens = 10 if args.num_fewshots > 0 else 20
 
     for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
-        if flag_multi_choice:
-            uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels = batch_data
+        if dataset.is_multi_choice:
+            uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels, is_origs = batch_data
         else:
-            uuids, answers, all_paraphrases = batch_data
+            uuids, answers, all_paraphrases, is_origs = batch_data
         
         preds_in_batch = []
         prompts_in_batch = []
         paraphrases_in_batch = []
+        is_origs_in_batch = []
         generations_in_batch = []
         predictions_in_batch = []
         choices_labels_in_batch = []
         choices_texts_in_batch = []
         answer_labels_in_batch = []
+        label_strs_in_batch = []
+        label_probs_in_batch = []
 
         few_shot_context = dataset.get_few_shot_examples(k=args.num_fewshots)
-        for paraphrases in all_paraphrases:
+        for paraphrases, is_origs_ in zip(all_paraphrases, is_origs):
             paraphrases_in_batch.extend(paraphrases)
-            if flag_multi_choice:
+            if dataset.is_multi_choice:
                 prompts = dataset.construct_multi_choice_prompts(few_shot_context, paraphrases, choices_labels[0], choices_texts[0])
             else:
                 prompts = dataset.construct_prompts(few_shot_context, paraphrases)
-            generations = single_generation(model, tokenizer, prompts, max_new_tokens=max_new_tokens)
+            generations, label_probs = single_generation(model, tokenizer, prompts, choice_labels=dataset.choice_labels, max_new_tokens=max_new_tokens)
+            
+            if dataset.is_multi_choice and choices_labels is not None:
+                label_strs, label_probs_ = zip(*label_probs) if label_probs is not None else ([], [])
+                label_probs_ = list(zip(*label_probs_) if label_probs_ else ([], []))
+                label_strs_in_batch.extend([label_strs] * len(paraphrases))
+                label_probs_in_batch.extend(label_probs_)
+
+                choices_labels_in_batch.extend(choices_labels)
+                choices_texts_in_batch.extend(choices_texts)
+                answer_labels_in_batch.extend(answer_labels)
+            
             predictions = [gen.strip().split("\n")[0] for gen in generations]
             prompts_in_batch.extend(prompts)
             preds_in_batch.extend(predictions)
             generations_in_batch.extend(generations)
             predictions_in_batch.extend(predictions)
-            if flag_multi_choice:
-                choices_labels_in_batch.extend(choices_labels)
-                choices_texts_in_batch.extend(choices_texts)
-                answer_labels_in_batch.extend(answer_labels)
-
-        if flag_multi_choice:
+            is_origs_in_batch.extend(is_origs_)
+                        
+        if dataset.is_multi_choice:
             items = {
                 "uuid": uuids * len(all_paraphrases),
                 "answers": answers * len(all_paraphrases),
                 "paraphrase": paraphrases_in_batch,
+                "is_orig": is_origs_in_batch,
                 "prompt": prompts_in_batch,
                 "prediction": predictions_in_batch,
                 "generation": generations_in_batch,
                 "choices_label": choices_labels_in_batch,
                 "choices_text": choices_texts_in_batch,
                 "answer_label": answer_labels_in_batch,
+                "labels": label_strs_in_batch,
+                "label_probs": label_probs_in_batch,
             }
         else:
             items = {
                 "uuid": uuids * len(all_paraphrases),
                 "answers": answers * len(all_paraphrases),
                 "paraphrase": paraphrases_in_batch,
+                "is_orig": is_origs_in_batch,
                 "prompt": prompts_in_batch,
                 "prediction": predictions_in_batch,
                 "generation": generations_in_batch,
@@ -187,7 +202,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Load dataset
-    flag_multi_choice = False
     if args.dataset == "webqa":
         from dataset import WebQADataset
         dataset = WebQADataset(model_name=args.model)
@@ -197,15 +211,12 @@ if __name__ == "__main__":
     elif args.dataset == "commonsense":
         from dataset import CommonsenseParaphraseDataset
         dataset = CommonsenseParaphraseDataset(model_name=args.model, debug=args.debug)
-        flag_multi_choice = True
     elif args.dataset == "mmlu":
         from dataset import MMLUParaphraseDataset
         dataset = MMLUParaphraseDataset(model_name=args.model, debug=args.debug)
-        flag_multi_choice = True
     elif args.dataset == "logiqa":
         from dataset import LogiQAParaphraseDataset
         dataset = LogiQAParaphraseDataset(model_name=args.model, debug=args.debug)
-        flag_multi_choice = True
     elif args.dataset == "hotpot":
         from dataset import HotpotDataset
         dataset = HotpotDataset(model_name=args.model, debug=args.debug)

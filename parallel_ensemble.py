@@ -12,7 +12,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from constants import MODEL_PATHs
-from utils import append_lemmas, init_spacy, lemmaize_chunk
+from utils import append_lemmas, get_label_prob, init_spacy, lemmaize_chunk
 
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
@@ -30,7 +30,8 @@ def ensemble_generation(
     multilayer=False, 
     token_mode="last",
     ensemble_layer_idx=10, 
-    ensemble_alpha=1.0):
+    ensemble_alpha=1.0, 
+    choice_labels=None):
 
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model.generation_config.temperature = None
@@ -67,9 +68,10 @@ def ensemble_generation(
                 raise ValueError(f"Unknown ensemble method: {ensemble_method}")
         
         if integration_method == "avg":
-            avg_logits = logits.mean(dim=0)
-            next_token = torch.argmax(avg_logits, dim=-1).unsqueeze(0).unsqueeze(1)
+            logits = logits.mean(dim=0)
+            next_token = torch.argmax(logits, dim=-1).unsqueeze(0).unsqueeze(1)
         elif integration_method == "max":    
+            logits = logits.max(dim=0)
             max_probs = logits.softmax(dim=-1).max(dim=0).values
             next_token = torch.argmax(max_probs, dim=-1).unsqueeze(0).unsqueeze(1)
         elif integration_method == "weighted_avg":
@@ -77,18 +79,22 @@ def ensemble_generation(
                 raise ValueError("Weights must be provided for weighted_avg integration.")
             weights = torch.tensor(weights).clone().detach().requires_grad_(False).to(logits.device)
             weights = weights / weights.sum(dim=0).unsqueeze(0)
-            weighted_logits = (logits * weights.unsqueeze(-1)).sum(dim=0)
-            next_token = torch.argmax(weighted_logits, dim=-1).unsqueeze(0).unsqueeze(1)
+            logits = (logits * weights.unsqueeze(-1)).sum(dim=0)
+            next_token = torch.argmax(logits, dim=-1).unsqueeze(0).unsqueeze(1)
         elif integration_method == "weighted_max":
             if weights is None:
                 raise ValueError("Weights must be provided for weighted_max integration.")
             weights = torch.tensor(weights).clone().detach().requires_grad_(False).to(logits.device)
             argmax = weights.argmax(dim=0)
-            max_logits = logits[argmax, torch.arange(logits.shape[1])]
-            next_token = max_logits.argmax(dim=-1).unsqueeze(0).unsqueeze(1)
+            logits = logits[argmax, torch.arange(logits.shape[1])]
+            next_token = logits.argmax(dim=-1).unsqueeze(0).unsqueeze(1)
         else:
             raise ValueError(f"Unknown integration method: {integration_method}")
         
+        label_probs = None
+        if step == 0 and choice_labels is not None:
+            label_probs = get_label_prob(tokenizer, logits, choice_labels)
+            
         # Take the element-wise min across the two distributions
         # Append next token to input_ids for next round
         inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token.expand(inputs["input_ids"].size(0), -1)], dim=1)
@@ -113,9 +119,9 @@ def ensemble_generation(
         print("⚠️  Warning: No tokens generated")
         return ""
     generated_texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
-    return generated_texts[0].strip()
+    return generated_texts[0].strip(), label_probs
 
-def sample_paraphrases_per_item(uuids, all_paraphrases, num_paraphrases, num_samples, repeat_paras=False):
+def sample_paraphrases_per_item(uuids, all_paraphrases, all_is_origs, num_paraphrases, num_samples, repeat_paras=False):
     """
     Sample paraphrases using the same logic as series_ensemble.py:
     1. Generate all permutations of paraphrase indices (or repeated patterns if repeat_paras=True)
@@ -144,6 +150,7 @@ def sample_paraphrases_per_item(uuids, all_paraphrases, num_paraphrases, num_sam
         uuid = uuids[item_idx]
         # Get all paraphrases for this item
         item_paraphrases = [all_paraphrases[i][item_idx] for i in range(num_paraphrase_versions)]
+        item_is_origs = [all_is_origs[i][item_idx] for i in range(num_paraphrase_versions)]
         
         # Generate all possible combinations
         all_indices = list(range(len(item_paraphrases)))
@@ -156,6 +163,7 @@ def sample_paraphrases_per_item(uuids, all_paraphrases, num_paraphrases, num_sam
             effective_num_paraphrases = len(all_indices)
         else:
             effective_num_paraphrases = num_paraphrases
+        
         if repeat_paras:
             # Repeat same paraphrase: [[0,0], [1,1], [2,2], ...]
             all_sampled_paras = list([[n] * effective_num_paraphrases for n in all_indices])
@@ -169,11 +177,11 @@ def sample_paraphrases_per_item(uuids, all_paraphrases, num_paraphrases, num_sam
         # Sample num_samples different combinations
         all_sampled_paras_list = list(all_sampled_paras)
         sampled_combinations = random.sample(all_sampled_paras_list, k=min(num_samples, len(all_sampled_paras_list)))
-        
         # For each combination, extract the actual paraphrases
         for paraids in sampled_combinations:
             sampled_paraphrases = [item_paraphrases[i] for i in paraids]
-            all_samples.append((uuid, sampled_paraphrases))
+            sammpled_is_origs = [item_is_origs[i] for i in paraids]
+            all_samples.append((uuid, sampled_paraphrases, sammpled_is_origs))
     
     return all_samples
 
@@ -341,7 +349,6 @@ def make_ffn_mid_activation_hook(
             else:
                 mean_last = x_last.max(dim=0, keepdim=True).values
             x[rows, last_pos, :] = x_last * (1 - alpha) + mean_last * alpha
-        # set_trace()
         return (x, *rest)
 
     return pre_hook
@@ -429,7 +436,6 @@ if __name__ == "__main__":
     parser.add_argument("--rewrite", action="store_true", help="Rewrite existing output files")
     args = parser.parse_args()    
 
-    flag_multi_choice = False
     if args.dataset == "webqa":
         from dataset import WebQADataset
         dataset = WebQADataset(model_name=args.model)
@@ -439,15 +445,12 @@ if __name__ == "__main__":
     elif args.dataset == "commonsense":
         from dataset import CommonsenseParaphraseDataset
         dataset = CommonsenseParaphraseDataset(model_name=args.model, debug=args.debug)
-        flag_multi_choice = True
     elif args.dataset == "mmlu":
         from dataset import MMLUParaphraseDataset
         dataset = MMLUParaphraseDataset(model_name=args.model, debug=args.debug)
-        flag_multi_choice = True
     elif args.dataset == "logiqa":
         from dataset import LogiQAParaphraseDataset
         dataset = LogiQAParaphraseDataset(model_name=args.model, debug=args.debug)
-        flag_multi_choice = True
     elif args.dataset == "hotpot":
         from dataset import HotpotDataset
         dataset = HotpotDataset(model_name=args.model, debug=args.debug)
@@ -504,7 +507,7 @@ if __name__ == "__main__":
     if args.logits_ensemble_method.startswith("weighted_"):
         conf_df = pd.read_feather(os.path.join(dataset.dataset_root, "confidence.feather"))
 
-    df = pd.DataFrame(columns=["uuid", "answers", "prediction", "generation","correctness"])
+    df = pd.DataFrame(columns=["uuid", "answers", "prediction", "generation"])
     if args.max_samples:
         print(f"Processing maximum {args.max_samples} samples")
     
@@ -514,10 +517,10 @@ if __name__ == "__main__":
 
     uuid_count = 0
     for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
-        if flag_multi_choice:
-            uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels = batch_data
+        if dataset.is_multi_choice:
+            uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels, is_origs = batch_data
         else:
-            uuids, answers, all_paraphrases = batch_data
+            uuids, answers, all_paraphrases, is_origs = batch_data
             choices_labels = [None] * len(uuids)
             choices_texts = [None] * len(uuids)
             answer_labels = [None] * len(uuids)
@@ -538,18 +541,20 @@ if __name__ == "__main__":
         samples = sample_paraphrases_per_item(
             uuids=uuids,
             all_paraphrases=all_paraphrases, 
+            all_is_origs=is_origs,
             num_paraphrases=args.num_paraphrases, 
             num_samples=args.num_samples,
             repeat_paras=args.repeat_paras
         )
         
-        for uuid, sampled_paraphrases in samples:
+        for uuid, sampled_paraphrases, sampled_is_origs in samples:
             idx = uuids.index(uuid)
-            if flag_multi_choice:
-                all_samples.append((uuid, answers[idx], sampled_paraphrases, 
-                                  choices_labels[idx], choices_texts[idx], answer_labels[idx]))
+            if dataset.is_multi_choice:
+                all_samples.append((
+                    uuid, answers[idx], sampled_paraphrases, sampled_is_origs,
+                    choices_labels[idx], choices_texts[idx], answer_labels[idx]))
             else:
-                all_samples.append((uuid, answers[idx], sampled_paraphrases, None, None, None))
+                all_samples.append((uuid, answers[idx], sampled_paraphrases, sampled_is_origs, None, None, None))
         if args.max_samples:
             uuid_count += len(uuids)
     
@@ -557,10 +562,10 @@ if __name__ == "__main__":
     
     # Process each sample
     for sample_data in tqdm(all_samples, desc="Generating", dynamic_ncols=True):
-        if flag_multi_choice:
-            uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label = sample_data
+        if dataset.is_multi_choice:
+            uuid, answer, sampled_paraphrases, sampled_is_origs, choices_label, choices_text, answer_label = sample_data
         else:
-            uuid, answer, sampled_paraphrases, _, _, _ = sample_data
+            uuid, answer, sampled_paraphrases, sampled_is_origs, _, _, _ = sample_data
             choices_label = None
             choices_text = None
             answer_label = None
@@ -580,7 +585,7 @@ if __name__ == "__main__":
                     confidences.append(1.0)  # Default confidence
             
             # Use different prompt construction based on dataset type
-        if flag_multi_choice:
+        if dataset.is_multi_choice:
             all_prompts = dataset.construct_multi_choice_prompts(
                 few_shot_examples, 
                 sampled_paraphrases,
@@ -590,7 +595,7 @@ if __name__ == "__main__":
         else:
             all_prompts = dataset.construct_prompts(few_shot_examples, sampled_paraphrases)
 
-        generation = ensemble_generation(
+        generation, label_probs = ensemble_generation(
             model,
             tokenizer,
             prompts=all_prompts, 
@@ -601,10 +606,13 @@ if __name__ == "__main__":
             ensemble_layer_idx=args.ensemble_layer - 1,
             ensemble_alpha=args.ensemble_alpha, 
             token_mode=args.token_mode,
-            multilayer=args.multilayer)
+            multilayer=args.multilayer, 
+            choice_labels=dataset.choice_labels)
+        
+        labels, label_probs = zip(*label_probs) if label_probs else ([], [])
         
         # Extract prediction - for multi-choice, extract first capital letter
-        if flag_multi_choice:
+        if dataset.is_multi_choice:
             import re
             match = re.search(r'[A-E]', generation.strip())
             prediction = match.group(0) if match else ""
@@ -614,14 +622,17 @@ if __name__ == "__main__":
         items = {
             "uuid": [uuid],
             "paraphrases": [sampled_paraphrases],
+            "is_orig": [sampled_is_origs],
             "prompts": [all_prompts],
             "answers": [answer],
             "prediction": [prediction],
             "generation": [generation],
+            "labels": [labels], 
+            "label_probs": [label_probs],
         }
         
         # Add multi-choice specific fields
-        if flag_multi_choice:
+        if dataset.is_multi_choice:
             items["choices_label"] = [choices_label]
             items["choices_text"] = [choices_text]
             items["answer_label"] = [answer_label]
