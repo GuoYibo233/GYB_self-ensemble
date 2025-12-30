@@ -53,7 +53,6 @@ def get_parallel_ensemble_filename(
 
 def calculate_accuracy(df, label, use_generation=True, is_multichoice=False, verbose=True):
     # answers = [answers for answers in df["answer_lemmas"]]
-
     if not is_multichoice:
         answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
         try:

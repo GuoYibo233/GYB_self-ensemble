@@ -20,6 +20,7 @@ Usage:
 import multiprocessing as mp
 import os
 import warnings
+from pdb import set_trace
 
 import numpy as np
 import pandas as pd
@@ -49,7 +50,7 @@ def generate_baseline_origin(dataset, dataloader, args):
     )
     few_shot_context = dataset.get_few_shot_examples()
     
-    max_new_tokens = 10 if args.num_fewshots > 0 else 30
+    max_new_tokens = 10 if args.num_fewshots > 0 else 20
     for uuids, answers, all_paraphrases in tqdm(
         dataloader, desc="Generating baseline (origin)", dynamic_ncols=True
     ):
@@ -83,7 +84,7 @@ def generate_baseline_per_prompt(dataset, dataloader, args):
         columns=["uuid", "answers", "paraphrase", "prompt", "prediction", "generation"]
     )
 
-    max_new_tokens = 10 if args.num_fewshots > 0 else 30
+    max_new_tokens = 10 if args.num_fewshots > 0 else 20
 
     for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
         if flag_multi_choice:
@@ -103,7 +104,10 @@ def generate_baseline_per_prompt(dataset, dataloader, args):
         few_shot_context = dataset.get_few_shot_examples(k=args.num_fewshots)
         for paraphrases in all_paraphrases:
             paraphrases_in_batch.extend(paraphrases)
-            prompts = dataset.construct_prompts(few_shot_context, paraphrases)
+            if flag_multi_choice:
+                prompts = dataset.construct_multi_choice_prompts(few_shot_context, paraphrases, choices_labels[0], choices_texts[0])
+            else:
+                prompts = dataset.construct_prompts(few_shot_context, paraphrases)
             generations = single_generation(model, tokenizer, prompts, max_new_tokens=max_new_tokens)
             predictions = [gen.strip().split("\n")[0] for gen in generations]
             prompts_in_batch.extend(prompts)

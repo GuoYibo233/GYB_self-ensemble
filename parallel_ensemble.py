@@ -22,7 +22,7 @@ num_parts = 8
 def ensemble_generation(
     model,
     tokenizer,
-    prompt_sets, 
+    prompts, 
     integration_method="max", 
     weights=None, 
     max_new_tokens=10,
@@ -38,8 +38,6 @@ def ensemble_generation(
     model.generation_config.pad_token_id = tokenizer.eos_token_id
 
     generated = None
-
-    prompts = [prompt[0] for prompt in prompt_sets]
     inputs = tokenizer(
         prompts, return_tensors="pt", 
         padding=True, truncation=True,
@@ -102,7 +100,6 @@ def ensemble_generation(
             generated = torch.cat([generated, next_token], dim=1)
 
         decoded_token = tokenizer.decode(next_token[0], skip_special_tokens=False)
-        
         # Check for EOS or newline (likely end of one-word answer)
         if next_token.item() == tokenizer.eos_token_id:
             break
@@ -117,32 +114,6 @@ def ensemble_generation(
         return ""
     generated_texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
     return generated_texts[0].strip()
-
-
-def construct_multi_choice_prompts(instruction, few_shot_examples, question, choices_label, choices_text):
-    """
-    Construct prompts for multiple-choice questions.
-    
-    Args:
-        instruction: The instruction text for multiple-choice QA
-        few_shot_examples: Few-shot examples string
-        question: The question text
-        choices_label: List of choice labels (e.g., ['A', 'B', 'C', 'D', 'E'])
-        choices_text: List of choice texts
-    
-    Returns:
-        List containing the formatted prompt
-    """
-    options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_label, choices_text)])
-    
-    if few_shot_examples:
-        prompt = f"{instruction}\n\n{few_shot_examples}\n\nQuestion:\n{question}\n\nOptions:\n{options_str}\n\nAnswer (A–E only):"
-    else:
-        prompt = f"{instruction}\n\nQuestion:\n{question}\n\nOptions:\n{options_str}\n\nAnswer (A–E only):"
-    
-    return [prompt]
-
-
 
 def sample_paraphrases_per_item(uuids, all_paraphrases, num_paraphrases, num_samples, repeat_paras=False):
     """
@@ -520,7 +491,7 @@ if __name__ == "__main__":
         print(f"✅ File {dump_file} already exists, skipping generation.")
         exit(0)
 
-    max_new_tokens = 10 if args.num_fewshots > 0 else 30    
+    max_new_tokens = 10 if args.num_fewshots > 0 else 20
     dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
 
     print(f"🔄 Starting {args.logits_ensemble_method} logits ensembling to {dump_file}")
@@ -609,24 +580,21 @@ if __name__ == "__main__":
                     confidences.append(1.0)  # Default confidence
             
             # Use different prompt construction based on dataset type
-            if flag_multi_choice:
-                prompts = construct_multi_choice_prompts(
-                    dataset.instruction, 
-                    few_shot_examples, 
-                    para,
-                    choices_label,
-                    choices_text
-                )
-            else:
-                prompts = dataset.construct_prompts(few_shot_examples, [para])
+        if flag_multi_choice:
+            all_prompts = dataset.construct_multi_choice_prompts(
+                few_shot_examples, 
+                sampled_paraphrases,
+                choices_label,
+                choices_text
+            )
+        else:
+            all_prompts = dataset.construct_prompts(few_shot_examples, sampled_paraphrases)
             
-            all_prompts.append(prompts)
-        
         generation = ensemble_generation(
             model,
             tokenizer,
-            prompt_sets=all_prompts, 
-            integration_method=args.logits_ensemble_method, 
+            prompts=all_prompts, 
+            integration_method=args.logits_ensemble_method,
             weights=[confidences] if confidences else None, 
             max_new_tokens=max_new_tokens, 
             ensemble_method=args.ensemble_method,

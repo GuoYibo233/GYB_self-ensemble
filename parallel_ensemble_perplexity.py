@@ -98,9 +98,9 @@ def measure_per_token_perplexity(
     model.generation_config.pad_token_id = tokenizer.eos_token_id
 
     paraphrases = [paraphrase for paraphrase in paraphrases]
-    qonly_prompt = [construct_perplexity_prompt(paraphrase, choice=None, few_shot_context=few_shot_context) for paraphrase in paraphrases]
+    qonly_prompts = [construct_perplexity_prompt(paraphrase, choice=None, few_shot_context=few_shot_context) for paraphrase in paraphrases]
     qonly_inputs = tokenizer(
-        qonly_prompt, return_tensors="pt", 
+        qonly_prompts, return_tensors="pt", 
         padding=True, truncation=True,
         padding_side='left', return_attention_mask=True).to(model.device)
     qonly_len = qonly_inputs["input_ids"].size(1)
@@ -147,7 +147,7 @@ def measure_per_token_perplexity(
         choice_ppls.append(choice_ppl.item())
     
     choice_ppls = np.array(choice_ppls)
-    return choice_ppls
+    return qonly_prompts, qchoice_prompts, choice_ppls
 
 
 if __name__ == "__main__":
@@ -219,7 +219,7 @@ if __name__ == "__main__":
         print(f"✅ File {dump_file} already exists, skipping generation.")
         exit(0)
 
-    max_new_tokens = 10 if args.num_fewshots > 0 else 30    
+    max_new_tokens = 10 if args.num_fewshots > 0 else 20    
     dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
 
     print(f"🔄 Starting {args.logits_ensemble_method} logits ensembling to {dump_file}")
@@ -272,17 +272,20 @@ if __name__ == "__main__":
             for uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label in \
                 tqdm(all_samples, desc="Generating", dynamic_ncols=True):
                 for paraphrase in sampled_paraphrases:
-                    ppls = measure_per_token_perplexity_partial(paraphrases=[paraphrase], choices=choices_text, few_shot_context=few_shot_context)
-                    yield uuid, answer, [paraphrase], choices_label, choices_text, answer_label, ppls
+                    qonly_prompts, qchoice_prompts, ppls = measure_per_token_perplexity_partial(paraphrases=[paraphrase], choices=choices_text, few_shot_context=few_shot_context)
+                    yield uuid, answer, [paraphrase], choices_label, choices_text, answer_label, ppls, qonly_prompts, qchoice_prompts
         else:
             for uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label in \
                 tqdm(all_samples, desc="Generating", dynamic_ncols=True):
-                ppls = measure_per_token_perplexity_partial(paraphrases=sampled_paraphrases, choices=choices_text, few_shot_context=few_shot_context)
-                yield uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label, ppls
+                qonly_prompts, qchoice_prompts, ppls = measure_per_token_perplexity_partial(paraphrases=sampled_paraphrases, choices=choices_text, few_shot_context=few_shot_context)
+                yield uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label, ppls, qonly_prompts, qchoice_prompts
     
-    for uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label, ppls in _get_iter():
+    for uuid, answer, sampled_paraphrases, choices_label, choices_text, answer_label, \
+        ppls, qonly_prompts, qchoice_prompts in _get_iter():
         items = {
             "uuid": [uuid],
+            "qonly_prompts": [qonly_prompts],
+            "qchoice_prompts": [qchoice_prompts],
             "paraphrases": [sampled_paraphrases],
             "answers": [answer],
             "ppls": [ppls],

@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import spacy
 import torch
+from tqdm import tqdm
 
 # Dynamic path configuration based on current user
 _current_user = os.environ.get('USER', 'unknown')
@@ -94,10 +95,6 @@ def get_few_shot_examples(dataset, k=5, seed=42):
     indices = random.sample(range(len(dataset)), k)
     return "\n\n".join(format_example(dataset[i]) for i in indices)
 
-def construct_prompts(questions, few_shot_examples, instruction):
-    prompts = [f"{instruction}\n\n{few_shot_examples}\n\nQ: {question}\nA:" for question in questions]
-    return prompts
-
 def single_generation(model, tokenizer, prompts, max_new_tokens=10):
     """Generate responses using greedy decoding."""
     tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -115,24 +112,38 @@ def single_generation(model, tokenizer, prompts, max_new_tokens=10):
     ).to(model.device)
 
     generated = None
+    
+    input_ids = inputs["input_ids"]
+    attn_mask = inputs["attention_mask"]
+    bsz = input_ids.size(0)
+    generated = torch.empty((bsz, max_new_tokens), dtype=input_ids.dtype, device=input_ids.device)
 
-    for step in range(max_new_tokens):
-        with torch.no_grad():
-            logits = model(
-                inputs["input_ids"], attention_mask=inputs["attention_mask"]
-            ).logits[:, -1, :]
-            next_token = torch.argmax(logits, dim=-1).unsqueeze(1)
+    past_key_values = None
 
-        inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token], dim=1)
-        inputs["attention_mask"] = torch.cat(
-            [inputs["attention_mask"], torch.ones_like(next_token)], dim=1
+    with torch.inference_mode():
+        out = model(
+            input_ids=input_ids,
+            attention_mask=attn_mask,
+            use_cache=True,
+            return_dict=True,
         )
-        
-        if generated is None:
-            generated = next_token
-        else:
-            generated = torch.cat([generated, next_token], dim=1)
+        logits = out.logits[:, -1, :]
+        past_key_values = out.past_key_values
 
+        for step in range(max_new_tokens):
+            next_token = torch.argmax(logits, dim=-1)  # [B]
+            generated[:, step] = next_token
+
+            out = model(
+                input_ids=next_token.unsqueeze(1),  # only 1 token
+                attention_mask=attn_mask,           # see note below
+                past_key_values=past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+            logits = out.logits[:, -1, :]
+            past_key_values = out.past_key_values
+    
     generated_texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
     new_generated_texts = [gen.strip() for gen in generated_texts]
     return new_generated_texts
@@ -287,8 +298,8 @@ def take_until_punct_or_space(tokens: list[str]) -> list[str]:
     """
     result = []
     for tok in tokens:
-        if tok.isspace() or tok in string.punctuation:
-            continue
+        if tok.isspace() or tok in [":", ";", ",", ".", "!", "?"]:
+            break
         result.append(tok)
     return result
 
@@ -319,11 +330,11 @@ def partial_match_scores(predictions, gold_answers, birdirect=False):
 def partial_match_scores_use_generation(predictions, gold_answers, birdirect=False):
     scores = []
     for generations, _gold_answers in zip(predictions, gold_answers):
-        generations = take_until_punct_or_space(generations[0])
+        generations_ = take_until_punct_or_space(generations[0])
         if len(generations) == 0:
             scores.append(0)
             continue
-        score = partial_match(generations, _gold_answers, birdirect)
+        score = partial_match(generations_, _gold_answers, birdirect)
         scores.append(int(score))
     return sum(scores)/len(scores)
 

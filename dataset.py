@@ -1,7 +1,7 @@
+import ast
 import hashlib
 import os
 import random
-import ast
 from abc import abstractmethod
 from pdb import set_trace
 
@@ -428,9 +428,32 @@ Choose the correct answer from {A, B, C, D, E}.
 Return ONLY one capital letter from {A, B, C, D, E}.
 Do NOT output anything else.
 
-Final answer format:
-Answer = <one letter>\n\n
+Format of input and output:
+Question:
+{question}
+
+Options:
+A. {option A}
+B. {option B}
+C. {option C}
+D. {option D}
+E. {option E}
+
+Answer = <one letter>
 """
+
+    def construct_multi_choice_prompts(self, few_shot_examples, paraphrases, choices_labels, choices_texts):
+        options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_labels, choices_texts)])
+        
+        prompts = []
+        for paraphrase in paraphrases:
+            if few_shot_examples:
+                prompt = f"{self.instruction}\n\n{few_shot_examples}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\nAnswer = "
+            else:
+                prompt = f"{self.instruction}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\nAnswer = "
+            prompts.append(prompt)
+        return prompts
+    
 
     def load_dataset(self):
         if os.path.exists(self.dataset_path):
@@ -481,12 +504,12 @@ Answer = <one letter>\n\n
 
     def collate_fn(self, batch):
         uuids = [item["uuid"] for item in batch]
-        answers = [item["answers"] for item in batch]
+        # answers = [item["answers"] for item in batch]
         paraphrases = [item["paraphrases"] for item in batch]
-        choices_label = [item["choices_label"] for item in batch]
-        choices_text = [item["choices_text"] for item in batch]
-        answer_label = [item["answer_label"] for item in batch]
-        return uuids, answers, list(zip(*paraphrases)), choices_label, choices_text, answer_label
+        choices_labels = [item["choices_label"] for item in batch]
+        choices_texts = [item["choices_text"] for item in batch]
+        answer_labels = [item["answer_label"] for item in batch]
+        return uuids, answer_labels, list(zip(*paraphrases)), choices_labels, choices_texts, answer_labels
 
     def get_few_shot_examples(self, k=5, seed=42, is_ppl_format=False):
         random.seed(seed)
@@ -619,6 +642,9 @@ class HotpotDataset(ParaPharaseDataset):
                 "manual_paraphrases": manual_paraphrases,
                 "auto_paraphrases": auto_paraphrases
             })
+
+            if self.debug and idx >= 100:
+                break
 
         print(f"✓ Processed {len(items)} items, skipped {skipped_count} items with insufficient paraphrases")
         
