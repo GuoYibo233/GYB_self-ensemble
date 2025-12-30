@@ -9,8 +9,6 @@ if [ "$MODEL_TYPE" == "base" ]; then
     MODELS="llama3.2_1b llama3.2_3b llama3.1_8b"
 elif [ "$MODEL_TYPE" == "it" ]; then
     MODELS="llama3.2_1b_it llama3.2_3b_it llama3.1_8b_it"
-elif [ "$MODEL_TYPE" == "others" ]; then
-    MODELS="qwen3_30b pythia_2.8b qwen3_4b"
 fi
 
 for MODEL in $MODELS ; do

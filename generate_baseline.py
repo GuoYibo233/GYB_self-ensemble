@@ -225,6 +225,9 @@ if __name__ == "__main__":
     
     dataloader = dataset.get_dataloader(batch_size=8, shuffle=False)
 
+    if args.model.startswith("phi3") and dataset.is_multi_choice:
+        dataset.choice_labels = [label.strip() for label in dataset.choice_labels]
+
     # Validate model
     if args.model not in MODEL_PATHs:
         raise ValueError(
@@ -245,8 +248,7 @@ if __name__ == "__main__":
         raise NotImplementedError("Method 'all' is not implemented in this script.")    
 
     if os.path.exists(dump_file) and not args.rewrite:
-        print(f"File {dump_file} already exists, skipping generation.")
-        print("Use --rewrite to regenerate.")
+        print(f"✅ File {dump_file} already exists, skipping generation. Use --rewrite to regenerate.")
         sys.exit(0)
     print(f"🔄 Output to: {dump_file}")
 

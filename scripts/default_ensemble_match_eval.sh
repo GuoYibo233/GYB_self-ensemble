@@ -14,7 +14,7 @@ fi
 
 # MODELS="llama3.2_3b qwen2.5_3b qwen3_4b pythia_2.8b qwen3_30b"
 # MODELS="qwen3_30b"
-MODELS="llama3.2_3b qwen2.5_3b qwen3_4b pythia_2.8b"
+MODELS="phi3.5_mini"
 # MODEL="llama3.2_3b"
 
 for NUM_FEWSHOTS in 0 5; do
@@ -35,10 +35,14 @@ for NUM_FEWSHOTS in 0 5; do
             LAYER=27
         elif [ "$MODEL" == "qwen3_30b" ]; then
             LAYER=36
-        elif [ "$MODEL" == "qwen3_235b" ]; then
-            LAYER=71
+        elif [ "$MODEL" == "bloom_3b" ]; then
+            LAYER=25
         elif [ "$MODEL" == "pythia_2.8b" ]; then
             LAYER=24
+        elif [ "$MODEL" == "phi3.5_mini" ]; then
+            LAYER=24
+        elif [ "$MODEL" == "gpt_20b" ]; then
+            LAYER=18
         else
             echo "Unknown MODEL: $MODEL"
             exit 1

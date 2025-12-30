@@ -13,6 +13,8 @@ for NUM_FEWSHOTS in 0 5; do
             LAYER=27
         elif [ "$MODEL" == "pythia_2.8b" ]; then
             LAYER=24
+        elif [ "$MODEL" == "phi3.5_mini" ]; then
+            LAYER=24
         elif [ "$MODEL" == "qwen3_30b" ]; then
             LAYER=36
         else

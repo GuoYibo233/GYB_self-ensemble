@@ -137,7 +137,7 @@ class ParaPharaseDataset:
     @property
     def choice_labels(self):
         return None
-
+        
     @property
     def is_multi_choice(self):
         return False
@@ -434,14 +434,12 @@ class MultiChoiceParaphraseDataset(ParaPharaseDataset):
     def is_multi_choice(self):
         return True
 
-#     @property
-#     def instruction(self):
-#         return """Answer the following multiple-choice question by selecting the correct option (A, B, C, D, or E).
-# Output exactly one capital letter corresponding to the chosen option. Do not output punctuation, text, or explanations"""
-
     @property
     def instruction(self):
-        return """You are given a multiple-choice question.
+        return getattr(
+            self, 
+            "_instruction", 
+            """You are given a multiple-choice question.
 Choose the correct answer from {A, B, C, D, E}.
 Return ONLY one capital letter from {A, B, C, D, E}.
 Do NOT output anything else.
@@ -458,17 +456,22 @@ D. {option D}
 E. {option E}
 
 Answer = <one letter>
-"""
+""")
 
+    @instruction.setter
+    def instruction(self, instruction):
+        self._instruction = instruction
+    
     def construct_multi_choice_prompts(self, few_shot_examples, paraphrases, choices_labels, choices_texts):
         options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_labels, choices_texts)])
         
         prompts = []
+        answer_part = "Answer =" if self._choice_labels[0][0] == " " else "Answer = "
         for paraphrase in paraphrases:
             if few_shot_examples:
-                prompt = f"{self.instruction}\n\n{few_shot_examples}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\nAnswer ="
+                prompt = f"{self.instruction}\n\n{few_shot_examples}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\{answer_part}"
             else:
-                prompt = f"{self.instruction}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\nAnswer ="
+                prompt = f"{self.instruction}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\n{answer_part}"
             prompts.append(prompt)
         return prompts
     
@@ -556,7 +559,12 @@ class CommonsenseParaphraseDataset(MultiChoiceParaphraseDataset):
 
     @property
     def choice_labels(self):
-        return [' A', ' B', ' C', ' D', ' E']
+        return getattr(self, "_choice_labels", [' A', ' B', ' C', ' D', ' E'])
+
+    @choice_labels.setter
+    def choice_labels(self, labels):
+        self._choice_labels = labels
+
 
 class MMLUParaphraseDataset(MultiChoiceParaphraseDataset):
     """MMLU (Massive Multitask Language Understanding) paraphrase dataset."""
@@ -565,7 +573,11 @@ class MMLUParaphraseDataset(MultiChoiceParaphraseDataset):
 
     @property
     def choice_labels(self):
-        return [' A', ' B', ' C', ' D']
+        return getattr(self, "_choice_labels", [' A', ' B', ' C', ' D'])
+
+    @choice_labels.setter
+    def choice_labels(self, labels):
+        self._choice_labels = labels
 
 class LogiQAParaphraseDataset(MultiChoiceParaphraseDataset):
     """LogiQA paraphrase dataset."""
@@ -574,7 +586,12 @@ class LogiQAParaphraseDataset(MultiChoiceParaphraseDataset):
 
     @property
     def choice_labels(self):
-        return [' A', ' B', ' C', ' D']
+        return getattr(self, "_choice_labels", [' A', ' B', ' C', ' D'])
+    
+    @choice_labels.setter
+    def choice_labels(self, labels):
+        self._choice_labels = labels
+
 
 class HotpotDataset(ParaPharaseDataset):
     """HotpotQA paraphrase dataset: 1 manual + 10 auto paraphrases per uuid."""

@@ -1,9 +1,8 @@
 import os
-from pdb import set_trace
 
 import numpy as np
 import pandas
-from numpy import argmax, isin
+from numpy import argmax
 
 from utils import partial_match_scores, partial_match_scores_use_generation
 
@@ -20,6 +19,9 @@ def get_layers(model: str):
         "qwen3_30b": 36,
         "qwen3_235b": 71,
         "pythia_2.8b": 24,
+        "phi4_mini": 24,
+        "bloom_3b": 25,
+        "gpt_20b": 18,
     }
 
     for key in model2layers:

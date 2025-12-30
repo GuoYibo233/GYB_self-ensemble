@@ -24,6 +24,8 @@ elif [ "$MODEL" == "qwen3_235b" ]; then
     LAYER=71
 elif [ "$MODEL" == "pythia_2.8b" ]; then
     LAYER=24
+elif [ "$MODEL" == "phi3.5_mini" ]; then
+    LAYER=24
 else
     echo "Unknown MODEL: $MODEL"
     exit 1

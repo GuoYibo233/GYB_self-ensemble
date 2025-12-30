@@ -2,12 +2,16 @@ import os
 
 # Set HuggingFace cache to net directory for all models
 # All models will be downloaded/cached to this centralized location
-HF_HOME = "/net/tokyo100-10g/data/str01_01/y-guo"
+_current_user = os.environ.get('USER', 'unknown')
+if _current_user == 'y-guo':
+    HF_HOME = "/net/tokyo100-10g/data/str01_01/y-guo"
+else:
+    HF_HOME = "/net/tokyo100-10g/data/str01_01/xzhao/huggingface"
+
+print(f"Setting HuggingFace cache directory to: {HF_HOME}")
+
 os.environ["HF_HOME"] = HF_HOME
 os.environ["HUGGINGFACE_HUB_CACHE"] = HF_HOME
-import os
-
-# Dynamic path configuration based on current user
 
 _model_base = "/net/tokyo100-10g/data/str01_01/xzhao/models/llama_hf"
 
@@ -39,5 +43,8 @@ MODEL_PATHs = {
     "qwen3_30b": "Qwen/Qwen3-30B-A3B",
     "qwen3_235b": "Qwen/Qwen3-235B-A22B",
     # Pythia Model
-    "pythia_2.8b": "EleutherAI/pythia-2.8b"
+    "bloom_3b": "bigscience/bloom-3b",
+    "pythia_2.8b": "EleutherAI/pythia-2.8b",
+    "phi3.5_mini": "microsoft/Phi-3.5-mini-instruct",
+    "gpt_20b": "openai/gpt-oss-20b"
 }

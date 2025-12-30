@@ -457,6 +457,9 @@ if __name__ == "__main__":
     else:
         raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', 'logiqa', or 'hotpot'.")
     
+    if args.model.startswith("phi3") and dataset.is_multi_choice:
+        dataset.choice_labels = [label.strip() for label in dataset.choice_labels]
+    
     if args.model not in MODEL_PATHs:
         raise ValueError(f"Model {args.model} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
     model_path = MODEL_PATHs.get(args.model, args.model)

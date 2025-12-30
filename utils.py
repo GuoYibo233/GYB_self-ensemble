@@ -18,6 +18,7 @@ else:
     DATASET_ROOT = "/net/tokyo100-10g/data/str01_01/xzhao/datasets/self-ensemble"
     PROJECT_DATASET_ROOT = "/home/xzhao/workspace/GYB_self-ensemble/datasets"
 
+
 nlp = None
 
 def init_spacy():
@@ -101,7 +102,9 @@ def get_label_prob(tokenizer, logits, choice_labels):
     label_probs = []
     for label in choice_labels:
         label_id = tokenizer.encode(label, add_special_tokens=False)
-        assert len(label_id) == 1, "Choice labels should be single tokens."
+        assert len(label_id) == 1, \
+            f"Only single-token labels are supported, got label '{label}' with token ids {label_id}"
+        
         if len(logits.shape) == 1:
             label_logit = probs[label_id[0]].cpu().item()
             label_probs.append((label, label_logit))
@@ -358,6 +361,8 @@ def is_list_of_str(generations):
             
 def _get_first_unspace_lemma(generation):
     assert isinstance(generation, list), f"generation should be a list of lemmas, got {generation} with type {type(generation)}"
+    if len(generation) == 0:
+        return ""
     if isinstance(generation[0], str):
         for lemma in generation:
             if lemma.strip() != "":
