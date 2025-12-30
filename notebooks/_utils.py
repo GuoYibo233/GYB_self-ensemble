@@ -25,7 +25,7 @@ def get_layers(model: str):
             return model2layers[key]
     raise NotImplementedError(f"Layers not defined for model {model}")
 
-def get_parallel_ensemble_filename(
+def get_series_ensemble_filename(
         dump_file_prefix, 
         modifyattn, modifyrope, 
         scale_score, num_fewshots,
@@ -53,7 +53,12 @@ def get_parallel_ensemble_filename(
     return dump_file
 
 def calculate_accuracy(df, label, use_generation=True, by_probs=False, verbose=True):
-    # answers = [answers for answers in df["answer_lemmas"]]
+    """
+    by_probs: whether to calculate accuracy based on label probabilities (for multi-choice tasks)
+    use_generation: whether to use generation_lemmas (True) or predict_lemma (False)
+    
+    by_probs is only for multi-choice tasks and has higher priority than use_generation
+    """
     if not by_probs:
         answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
         try:
@@ -71,10 +76,13 @@ def calculate_accuracy(df, label, use_generation=True, by_probs=False, verbose=T
             print(f"KeyError: {e} ==> 🏷️ {label}")
     else:
         labels = df['labels'].tolist()[0]
+        assert isinstance(labels, list) and len(labels) > 0, "labels should be a list of label strings and not empty."
         pred_labels = [labels[argmax(probs).item()].strip() for probs in df['label_probs'].tolist()]
-        acc = sum([pred == answer for pred, answer in zip(pred_labels, df['answer_label'].tolist())])/len(df)
+        scores = [pred == answer for pred, answer in zip(pred_labels, df['answer_label'].tolist())]
+        df["correct"] = scores
+        acc = sum(scores)/len(scores)
         if verbose:
-            print(f"Multichoice Acc: {acc:.4f} ==> 🏷️ {label}")
+            print(f"Acc: {acc:.4f} ==> 🏷️ {label}")
     return acc
 
 # def calculate_accuracy(df, label, use_generation=True, is_multichoice=False, verbose=True):
@@ -106,38 +114,29 @@ def calculate_accuracy(df, label, use_generation=True, by_probs=False, verbose=T
 
 def _read_per_prompt_dataframe(dataset_root, ds_name, model_name, num_fewshots):
     try:
-        if ds_name in ["myriadlama", "hotpot"]:
-            baseline_df = pandas.read_feather(
-                os.path.join(
-                    dataset_root,  ds_name, model_name, 
-                    f"baseline_per_prompt.{num_fewshots}shots.feather"))
-        elif ds_name in ["commonsense", "mmlu", "logiqa"]:
-            baseline_df = pandas.read_feather(
-                os.path.join(
-                    dataset_root, f"{ds_name}_paraphrase", model_name, 
-                    f"baseline_per_prompt.{num_fewshots}shots.feather"))
-        else:
-            raise ValueError(f"Unsupported dataset {ds_name} for oracle accuracy calculation.")
+        baseline_df = pandas.read_feather(
+            os.path.join(
+                dataset_root,  ds_name, model_name, 
+                f"baseline_per_prompt.{num_fewshots}shots.feather"))
         return baseline_df    
     except FileNotFoundError as e:
         print(f"FileNotFoundError: {e}")
         return None
-    
 
-def calculate_baseline_accuracy(dataset_root, ds_name, model_name, num_fewshots):
+def calculate_baseline_accuracy(dataset_root, ds_name, model_name, num_fewshots, by_probs=False):
     baseline_df = _read_per_prompt_dataframe(
         dataset_root, ds_name, model_name, num_fewshots)
     if baseline_df is None:
         return None
-    calculate_accuracy(baseline_df, "baseline of average accuracy per-paraphrase")
+    calculate_accuracy(baseline_df, "baseline of average accuracy per-paraphrase", by_probs=by_probs)
 
-def calculate_oracle_accuracy(dataset_root, ds_name, model_name, num_fewshots):
+def calculate_oracle_accuracy(dataset_root, ds_name, model_name, num_fewshots, by_probs=False):
     baseline_df = _read_per_prompt_dataframe(
         dataset_root, ds_name, model_name, num_fewshots)
     if baseline_df is None:
         return None
     
-    calculate_accuracy(baseline_df, "", verbose=False)
+    calculate_accuracy(baseline_df, "", verbose=False, by_probs=by_probs)
     
     scores = []
     for uuid, gdf in baseline_df.groupby('uuid'):
@@ -151,7 +150,7 @@ def calculate_series_ensemble_accuracy(
         modifyattn, modifyrope, scale_score,
         num_paraphrases, num_fewshots, num_samples, 
         use_generation=True):
-    filename = get_parallel_ensemble_filename(
+    filename = get_series_ensemble_filename(
         dump_file_prefix=dump_file_prefix,
         modifyattn=modifyattn, modifyrope=modifyrope, scale_score=scale_score,
         single_para_qapair=single_para_qapair, explicit_prompts=explicit_prompts, 
@@ -212,7 +211,7 @@ def report_series_ensemble_accuracy_by_nshot(
             use_generation=use_generation)
         
 
-def get_series_ensemble_filename(
+def get_parallel_ensemble_filename(
         dump_file_prefix, repeat_paras, 
         logits_ensemble_method,
         ensemble_method, ensemble_layer,
@@ -243,8 +242,8 @@ def calculate_parallel_ensemble_accuracy(
         logits_ensemble_method,
         ensemble_method=None, ensemble_layer=None, 
         multilayer=False, ensemble_alpha=1.0, 
-        token_mode="all", use_generation=True):
-    filename = get_series_ensemble_filename(
+        token_mode="all", use_generation=True, by_probs=False):
+    filename = get_parallel_ensemble_filename(
         dump_file_prefix=dump_file_prefix, repeat_paras=repeat_paras, 
         logits_ensemble_method=logits_ensemble_method,
         ensemble_method=ensemble_method, ensemble_layer=ensemble_layer,
@@ -267,5 +266,5 @@ def calculate_parallel_ensemble_accuracy(
     label += f"{'Multilayer' if multilayer else ''} "
     label += f"alpha{ensemble_alpha} token-{token_mode}"
     
-    calculate_accuracy(df, label, use_generation=use_generation)
+    calculate_accuracy(df, label, use_generation=use_generation, by_probs=by_probs)
     return df

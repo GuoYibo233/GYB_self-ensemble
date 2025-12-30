@@ -233,15 +233,7 @@ if __name__ == "__main__":
 
     model_path = MODEL_PATHs.get(args.model, args.model)
 
-    print("=" * 70)
-    print("Baseline Generation for Self-Ensemble Experiments")
-    print("=" * 70)
-    print(f"Dataset: {args.dataset}")
-    print(f"Model: {args.model}")
-    print(f"Device: {args.device}")
-    print(f"Rewrite: {args.rewrite}")
-    print()
-    
+    print("Baseline Generation for Self-Ensemble Experiments")    
     
     if args.method == "origin":
         dump_file = f"{dataset.dataset_root}/baseline_origin.{args.num_fewshots}shots.feather"

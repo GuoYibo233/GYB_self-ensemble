@@ -50,6 +50,7 @@ def ensemble_generation(
     else:
         layer_indices = [ensemble_layer_idx]
     
+    label_probs = None
     for step in range(max_new_tokens):
         with torch.no_grad():
             if ensemble_method is None:
@@ -91,10 +92,9 @@ def ensemble_generation(
         else:
             raise ValueError(f"Unknown integration method: {integration_method}")
         
-        label_probs = None
         if step == 0 and choice_labels is not None:
             label_probs = get_label_prob(tokenizer, logits, choice_labels)
-            
+        
         # Take the element-wise min across the two distributions
         # Append next token to input_ids for next round
         inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token.expand(inputs["input_ids"].size(0), -1)], dim=1)
@@ -610,7 +610,7 @@ if __name__ == "__main__":
             choice_labels=dataset.choice_labels)
         
         labels, label_probs = zip(*label_probs) if label_probs else ([], [])
-        
+        set_trace()
         # Extract prediction - for multi-choice, extract first capital letter
         if dataset.is_multi_choice:
             import re
