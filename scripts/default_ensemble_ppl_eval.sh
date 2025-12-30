@@ -21,7 +21,9 @@ for NUM_FEWSHOTS in 0 5; do
         fi
     
         # Baseline
-        CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble_perplexity.py \
+        CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble_perplexity_comparable.py \
+                --debug \
+                --rewrite \
                 --model $MODEL \
                 --dataset $DATASET \
                 --num_paraphrases 5 \
@@ -30,6 +32,8 @@ for NUM_FEWSHOTS in 0 5; do
 
         # Ensemble
         CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble_perplexity.py \
+                --debug \
+                --rewrite \
                 --model $MODEL \
                 --dataset $DATASET \
                 --num_paraphrases 5 \
