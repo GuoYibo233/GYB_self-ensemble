@@ -76,17 +76,21 @@ def calculate_accuracy(df, label, use_generation=True, is_multichoice=False, ver
             print(f"Multichoice Acc: {acc:.4f} ==> 🏷️ {label}")
     return acc
 
-def calculate_baseline_accuracy(dataset_root, model_name, num_fewshots):
+def calculate_baseline_accuracy(dataset_root, ds_name, model_name, num_fewshots):
     try:
-        baseline_df = pandas.read_feather(
-            os.path.join(
-                dataset_root, 
-                "myriadlama",
-                model_name, 
-                f"baseline_per_prompt.{num_fewshots}shots.feather")
-            )
-    except Exception as e:
-        print(f"Error reading baseline for {model_name} with {num_fewshots} shots: {e}")
+        if ds_name == "myriadlama":
+            baseline_df = pandas.read_feather(
+                os.path.join(
+                    dataset_root,  "myriadlama", model_name, 
+                    f"baseline_per_prompt.{num_fewshots}shots.feather"))
+        else:
+            baseline_df = pandas.read_feather(
+                os.path.join(
+                    dataset_root, f"{ds_name}_paraphrase", model_name, 
+                    f"baseline_per_prompt.{num_fewshots}shots.feather"))
+    except FileNotFoundError as e:
+        print(f"FileNotFoundError: {e}")
+        return None
     
     calculate_accuracy(baseline_df, "baseline of average accuracy per-paraphrase")
 
@@ -105,13 +109,14 @@ def calculate_series_ensemble_accuracy(
         dump_file_prefix,
         single_para_qapair, explicit_prompts, repeat_paras,
         modifyattn, modifyrope, scale_score,
-        num_paraphrases, num_fewshots, use_generation=True):
+        num_paraphrases, num_fewshots, num_samples, 
+        use_generation=True):
     filename = get_parallel_ensemble_filename(
         dump_file_prefix=dump_file_prefix,
         modifyattn=modifyattn, modifyrope=modifyrope, scale_score=scale_score,
         single_para_qapair=single_para_qapair, explicit_prompts=explicit_prompts, 
         repeat_paras=repeat_paras, num_fewshots=num_fewshots,
-        num_paraphrases=num_paraphrases, num_samples=5)
+        num_paraphrases=num_paraphrases, num_samples=num_samples)
     if os.path.exists(filename) is False:
         basename = filename.replace(dump_file_prefix, "./")
         print(f"File {basename} does not exist!")
@@ -194,7 +199,7 @@ def get_series_ensemble_filename(
 
 def calculate_parallel_ensemble_accuracy(
         dump_file_prefix, repeat_paras,
-        num_paraphrases, num_fewshots,
+        num_paraphrases, num_fewshots, num_samples,
         logits_ensemble_method,
         ensemble_method=None, ensemble_layer=None, 
         multilayer=False, ensemble_alpha=1.0, 
@@ -204,7 +209,7 @@ def calculate_parallel_ensemble_accuracy(
         logits_ensemble_method=logits_ensemble_method,
         ensemble_method=ensemble_method, ensemble_layer=ensemble_layer,
         multilayer=multilayer, ensemble_alpha=ensemble_alpha, token_mode=token_mode,
-        num_fewshots=num_fewshots, num_paraphrases=num_paraphrases, num_samples=5)
+        num_fewshots=num_fewshots, num_paraphrases=num_paraphrases, num_samples=num_samples)
     if os.path.exists(filename) is False:
         basename = filename.replace(dump_file_prefix, "./")
         print(f"File {basename} does not exist!")

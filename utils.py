@@ -331,7 +331,7 @@ def partial_match_scores_use_generation(predictions, gold_answers, birdirect=Fal
     scores = []
     for generations, _gold_answers in zip(predictions, gold_answers):
         generations_ = take_until_punct_or_space(generations[0])
-        if len(generations) == 0:
+        if len(generations_) == 0:
             scores.append(0)
             continue
         score = partial_match(generations_, _gold_answers, birdirect)

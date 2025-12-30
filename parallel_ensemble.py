@@ -589,7 +589,7 @@ if __name__ == "__main__":
             )
         else:
             all_prompts = dataset.construct_prompts(few_shot_examples, sampled_paraphrases)
-            
+
         generation = ensemble_generation(
             model,
             tokenizer,
