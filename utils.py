@@ -298,20 +298,6 @@ def normalize_answer(s):
         return str(s).strip()
     else:
         return ""
-    
-# def partial_match(prediction, gold_answers, birdirect=False):
-#     """Return 1 if the prediction matches any gold answer after normalization."""
-#     pred_norm = normalize_answer(prediction)
-#     answer_norms = [normalize_answer(answer) for answer in gold_answers]
-
-#     def is_match(pred, ans):
-#         if birdirect:
-#             return pred in ans or ans in pred
-#         else:
-#             return ans in pred
-
-#     matches = any([is_match(pred_norm, ans) for ans in answer_norms])
-#     return matches
 
 def take_until_punct_or_space(tokens: list[str]) -> list[str]:
     """
@@ -325,22 +311,6 @@ def take_until_punct_or_space(tokens: list[str]) -> list[str]:
         result.append(tok)
     return result
 
-# def partial_match_scores(predictions, gold_answers, birdirect=False):
-#     scores = []
-#     for prediction, _gold_answers in zip(predictions, gold_answers):
-#         try:
-#             prediction = prediction.tolist()
-#         except Exception:
-#             assert isinstance(prediction, str)
-#             prediction = [prediction]
-
-#         if len(prediction) == 0:
-#             scores.append(0)
-#             continue
-        
-#         score = partial_match(prediction, _gold_answers, birdirect)        
-#         scores.append(int(score))
-#     return sum(scores)/len(scores)
 
 def partial_match_scores(predictions, gold_answers, birdirect=False):
     scores = []

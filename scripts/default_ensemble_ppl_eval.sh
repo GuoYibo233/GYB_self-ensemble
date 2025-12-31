@@ -17,6 +17,8 @@ for NUM_FEWSHOTS in 0 5; do
             LAYER=24
         elif [ "$MODEL" == "qwen3_30b" ]; then
             LAYER=36
+        elif [ "$MODEL" == "gpt_20b" ]; then
+            LAYER=18
         else
             echo "Unknown MODEL: $MODEL"
             exit 1

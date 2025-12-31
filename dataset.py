@@ -398,6 +398,36 @@ class MyriadLamaDataset(ParaPharaseDataset):
         answer = example["answers"][0]
         return f"Q: {question}\nA: {answer}"
 
+class MyriadLama100Dataset(MyriadLamaDataset):
+    def __init__(self, model_name, debug=False):
+        super().__init__(model_name, debug)
+    
+    @property
+    def dataset_root(self):
+        if self.debug:
+            return os.path.join(
+                PROJECT_DATASET_ROOT, "myriadlama100-debug", self.model_name
+            )
+        else:
+            return os.path.join(PROJECT_DATASET_ROOT, "myriadlama100", self.model_name)
+
+    def collate_fn(self, batch):
+        uuids = [item["uuid"] for item in batch]
+        answers = [item["answers"] for item in batch]
+        paraphrases = []
+        is_origs = []
+        for item in batch:
+            uuid = item["uuid"]
+            random.seed(uuid)
+            manual_list = item["manual_paraphrases"]
+            auto_list = item["auto_paraphrases"]
+            merged = manual_list + auto_list
+            assert len(merged) == 100, f"⚠️ MyriadLAMA uuid {uuid}: paraphrase merging error"
+            paraphrases.append(merged)
+            is_origs.append([True]*5 + [False]*95)
+
+        return uuids, answers, list(zip(*paraphrases)), list(zip(*is_origs))
+
 
 class MultiChoiceParaphraseDataset(ParaPharaseDataset):
     """
@@ -466,10 +496,10 @@ Answer = <one letter>
         options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_labels, choices_texts)])
         
         prompts = []
-        answer_part = "Answer =" if self._choice_labels[0][0] == " " else "Answer = "
+        answer_part = "Answer =" if self.choice_labels[0][0] == " " else "Answer = "
         for paraphrase in paraphrases:
             if few_shot_examples:
-                prompt = f"{self.instruction}\n\n{few_shot_examples}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\{answer_part}"
+                prompt = f"{self.instruction}\n\n{few_shot_examples}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\n{answer_part}"
             else:
                 prompt = f"{self.instruction}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\n{answer_part}"
             prompts.append(prompt)

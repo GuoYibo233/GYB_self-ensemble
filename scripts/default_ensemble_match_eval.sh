@@ -12,9 +12,9 @@ else
     NUM_SAMPLES=1
 fi
 
-# MODELS="llama3.2_3b qwen2.5_3b qwen3_4b pythia_2.8b qwen3_30b"
+MODELS="llama3.2_3b qwen2.5_3b qwen3_4b phi3.5_mini"
 # MODELS="qwen3_30b"
-MODELS="phi3.5_mini"
+# MODELS="phi3.5_mini"
 # MODEL="llama3.2_3b"
 
 for NUM_FEWSHOTS in 0 5; do

@@ -498,15 +498,14 @@ if __name__ == "__main__":
         exit(0)
 
     max_new_tokens = 10 if args.num_fewshots > 0 else 20
-    dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
+    dataloader = dataset.get_dataloader(batch_size=8, shuffle=False)
 
     print(f"🔄 Starting {args.logits_ensemble_method} logits ensembling to {dump_file}")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
     # model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", dtype="auto")
-
-    dataloader = dataset.get_dataloader(batch_size=8, shuffle=False)
+    
     if args.logits_ensemble_method.startswith("weighted_"):
         conf_df = pd.read_feather(os.path.join(dataset.dataset_root, "confidence.feather"))
 
