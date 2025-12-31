@@ -60,6 +60,14 @@ for NUM_FEWSHOTS in 0 5; do
             --dataset $DATASET \
             --num_paraphrases 5 \
             --num_fewshots $NUM_FEWSHOTS \
+            --num_samples $NUM_SAMPLES
+            
+        CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
+            --logits_ensemble_method avg \
+            --model $MODEL \
+            --dataset $DATASET \
+            --num_paraphrases 5 \
+            --num_fewshots $NUM_FEWSHOTS \
             --num_samples $NUM_SAMPLES \
             --ensemble_method layer_output_avg \
             --ensemble_layer $LAYER \
