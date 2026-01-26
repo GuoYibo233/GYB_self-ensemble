@@ -28,6 +28,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from constants import MODEL_PATHs
+from dataset import get_dataset_instance
 from utils import append_lemmas, init_spacy, lemmaize_chunk, single_generation
 
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
@@ -71,6 +72,11 @@ def generate_baseline_origin(dataset, dataloader, args):
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
     return df
 
+def create_batches(iterable, batch_size):
+    """Yield successive batches from iterable."""
+    for i in range(0, len(iterable), batch_size):
+        yield iterable[i:i + batch_size]
+
 def generate_baseline_per_prompt(dataset, dataloader, args):
     """
     Baseline 2: Generate with each paraphrase separately.
@@ -85,76 +91,85 @@ def generate_baseline_per_prompt(dataset, dataloader, args):
     )
 
     max_new_tokens = 10 if args.num_fewshots > 0 else 20
+    few_shot_context = dataset.get_few_shot_examples(k=args.num_fewshots)
 
-    for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
+    if not dataset.is_multi_choice:
+        all_uuids, all_answers, all_paraphrases, all_is_origs = [], [], [], []
+        for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
+            _uuids, _answers, _all_paraphrases, _is_origs = batch_data
+            assert len(_uuids) == 1, "Batch size must be 1 for baseline per_prompt generation."
+            assert len(_all_paraphrases) == len(_is_origs), "Mismatch in paraphrases and is_orig lengths."
+            for paraphrase, is_orig in zip(_all_paraphrases, _is_origs):
+                all_uuids.append(_uuids[0])
+                all_answers.append(_answers[0])
+                all_paraphrases.append(paraphrase[0])
+                all_is_origs.append(is_orig[0])
+        batch_iterator = create_batches(list(zip(all_uuids, all_answers, all_paraphrases, all_is_origs)), batch_size=args.batch_size)
+    else:
+        all_uuids, all_answers, all_paraphrases, all_choices_labels, all_choices_texts, all_answer_labels, all_is_origs = [], [], [], [], [], [], []
+        for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
+            _uuids, _answers, _all_paraphrases, _choices_labels, _choices_texts, _answer_labels, _is_origs = batch_data
+            assert len(_uuids) == 1, "Batch size must be 1 for baseline per_prompt generation."
+            assert len(_all_paraphrases) == len(_is_origs), "Mismatch in paraphrases and is_orig lengths."
+            choices_labels = _choices_labels[0]
+            choices_texts = _choices_texts[0]
+            answer_labels = _answer_labels[0]
+            for paraphrase, is_orig in zip(_all_paraphrases, _is_origs):
+                all_uuids.append(_uuids[0])
+                all_answers.append(_answers[0])
+                all_paraphrases.append(paraphrase[0])
+                all_is_origs.append(is_orig[0])
+                all_choices_labels.append(choices_labels)
+                all_choices_texts.append(choices_texts)
+                all_answer_labels.append(answer_labels)
+                # print(paraphrase[0], choices_texts, answer_labels)
+                # set_trace()
+        batch_iterator = create_batches(
+            list(zip(
+                all_uuids, all_answers, all_paraphrases, 
+                all_choices_labels, all_choices_texts, 
+                all_answer_labels, all_is_origs)), 
+            batch_size=args.batch_size)
+    
+    for batch in tqdm(batch_iterator, desc="Generating baseline (per_prompt)", dynamic_ncols=True, total=len(all_uuids)//args.batch_size + 1):
         if dataset.is_multi_choice:
-            uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels, is_origs = batch_data
+            (uuids, answers, paraphrases, 
+             choices_labels, choices_texts, 
+             answer_labels, is_origs) = zip(*batch)
         else:
-            uuids, answers, all_paraphrases, is_origs = batch_data
+            uuids, answers, paraphrases, is_origs = zip(*batch)
         
-        preds_in_batch = []
-        prompts_in_batch = []
-        paraphrases_in_batch = []
-        is_origs_in_batch = []
-        generations_in_batch = []
-        predictions_in_batch = []
-        choices_labels_in_batch = []
-        choices_texts_in_batch = []
-        answer_labels_in_batch = []
-        label_strs_in_batch = []
-        label_probs_in_batch = []
-
-        few_shot_context = dataset.get_few_shot_examples(k=args.num_fewshots)
-        for paraphrases, is_origs_ in zip(all_paraphrases, is_origs):
-            paraphrases_in_batch.extend(paraphrases)
-            if dataset.is_multi_choice:
-                prompts = dataset.construct_multi_choice_prompts(few_shot_context, paraphrases, choices_labels[0], choices_texts[0])
-            else:
-                prompts = dataset.construct_prompts(few_shot_context, paraphrases)
-            generations, label_probs = single_generation(model, tokenizer, prompts, choice_labels=dataset.choice_labels, max_new_tokens=max_new_tokens)
-            
-            if dataset.is_multi_choice and choices_labels is not None:
-                label_strs, label_probs_ = zip(*label_probs) if label_probs is not None else ([], [])
-                label_probs_ = list(zip(*label_probs_) if label_probs_ else ([], []))
-                label_strs_in_batch.extend([label_strs] * len(paraphrases))
-                label_probs_in_batch.extend(label_probs_)
-
-                choices_labels_in_batch.extend(choices_labels)
-                choices_texts_in_batch.extend(choices_texts)
-                answer_labels_in_batch.extend(answer_labels)
-            
-            predictions = [gen.strip().split("\n")[0] for gen in generations]
-            prompts_in_batch.extend(prompts)
-            preds_in_batch.extend(predictions)
-            generations_in_batch.extend(generations)
-            predictions_in_batch.extend(predictions)
-            is_origs_in_batch.extend(is_origs_)
-                        
         if dataset.is_multi_choice:
-            items = {
-                "uuid": uuids * len(all_paraphrases),
-                "answers": answers * len(all_paraphrases),
-                "paraphrase": paraphrases_in_batch,
-                "is_orig": is_origs_in_batch,
-                "prompt": prompts_in_batch,
-                "prediction": predictions_in_batch,
-                "generation": generations_in_batch,
-                "choices_label": choices_labels_in_batch,
-                "choices_text": choices_texts_in_batch,
-                "answer_label": answer_labels_in_batch,
-                "labels": label_strs_in_batch,
-                "label_probs": label_probs_in_batch,
-            }
+            prompts = []
+            for paraphrase, _choice_labels, _choice_texts in zip(paraphrases, choices_labels, choices_texts):
+                prompt = dataset.construct_multi_choice_prompts(few_shot_context, [paraphrase], _choice_labels, _choice_texts)
+                prompts.append(prompt[0])
         else:
-            items = {
-                "uuid": uuids * len(all_paraphrases),
-                "answers": answers * len(all_paraphrases),
-                "paraphrase": paraphrases_in_batch,
-                "is_orig": is_origs_in_batch,
-                "prompt": prompts_in_batch,
-                "prediction": predictions_in_batch,
-                "generation": generations_in_batch,
-            }
+            prompts = dataset.construct_prompts(few_shot_context, paraphrases)
+        
+        generations, label_probs = single_generation(model, tokenizer, prompts, choice_labels=dataset.choice_labels, max_new_tokens=max_new_tokens)
+        generations = [gen.strip().split("\n")[0] for gen in generations]
+        predictions = [gen.strip().split("\n")[0] for gen in generations]
+        label_strs, label_probs_ = zip(*label_probs) if label_probs is not None else ([], [])
+        label_probs_ = list(zip(*label_probs_))
+        
+        items = {
+            "uuid": uuids,
+            "answers": answers,
+            "paraphrase": paraphrases,
+            "is_orig": is_origs,
+            "prompt": prompts,
+            "prediction": predictions,
+            "generation": generations,
+        }
+
+        if dataset.is_multi_choice:
+            items.update({
+                "choices_label": choices_labels,
+                "choices_text": choices_texts,
+                "answer_label": answer_labels,
+                "labels": [label_strs] * len(paraphrases),
+                "label_probs": label_probs_})
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
     return df
 
@@ -188,52 +203,27 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa", "hotpot"], help="Dataset: 'webqa' or 'myriadlama'")
     parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on (default: cuda)")
     parser.add_argument("--num_fewshots", type=int, default=5, help="Number of few-shot examples to use in prompts (default: 5)")
-    parser.add_argument(
-        "--rewrite",
-        action="store_true",
-        help="Regenerate baseline even if file already exists",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode with verbose output",
-    )
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for processing (default: 5)")
+    parser.add_argument("--additional_paraphrases_file", type=str, default=None, help="Path to additional paraphrases file (for datasets that support it)")
+    parser.add_argument("--rewrite", action="store_true", help="Regenerate baseline even if file already exists",)
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose output",)
 
     args = parser.parse_args()
 
     # Load dataset
-    if args.dataset == "webqa":
-        from dataset import WebQADataset
-        dataset = WebQADataset(model_name=args.model)
-    elif args.dataset == "myriadlama":
-        from dataset import MyriadLamaDataset
-        dataset = MyriadLamaDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "commonsense":
-        from dataset import CommonsenseParaphraseDataset
-        dataset = CommonsenseParaphraseDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "mmlu":
-        from dataset import MMLUParaphraseDataset
-        dataset = MMLUParaphraseDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "logiqa":
-        from dataset import LogiQAParaphraseDataset
-        dataset = LogiQAParaphraseDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "hotpot":
-        from dataset import HotpotDataset
-        dataset = HotpotDataset(model_name=args.model, debug=args.debug)
-    else:
-        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', or 'logiqa'.")
-    
-    dataloader = dataset.get_dataloader(batch_size=8, shuffle=False)
+    dataset = get_dataset_instance(
+        dataset_name=args.dataset,
+        model_name=args.model,
+        debug=args.debug,
+        additional_paraphrases_file=args.additional_paraphrases_file,
+    )
+    dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
 
     if args.model.startswith("phi3") and dataset.is_multi_choice:
         dataset.choice_labels = [label.strip() for label in dataset.choice_labels]
 
-    # Validate model
     if args.model not in MODEL_PATHs:
-        raise ValueError(
-            f"Model {args.model} is not supported. Please choose from {list(MODEL_PATHs.keys())}."
-        )
-
+        raise ValueError(f"Model {args.model} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
     model_path = MODEL_PATHs.get(args.model, args.model)
 
     print("Baseline Generation for Self-Ensemble Experiments")    

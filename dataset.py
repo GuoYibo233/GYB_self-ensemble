@@ -2,7 +2,6 @@ import hashlib
 import os
 import random
 from abc import abstractmethod
-from pdb import set_trace
 
 import pandas as pd
 from torch.utils.data import DataLoader
@@ -11,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from constants import MODEL_PATHs
 from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
-from utils import DATASET_ROOT, PROJECT_DATASET_ROOT, set_seed
+from utils import DATASET_ROOT, PROJECT_DATASET_ROOT, load_jsonl, set_seed
 
 COMMONSENSE_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_commonsense_paraphrase"
 MMLA_PARAPHRASE_PATH = "/home/y-guo/self-ensemble/new_datasets/my_mmlu_paraphrase"
@@ -113,13 +112,21 @@ def webqa_collate_fn(batch):
     return questions, answers
 
 class ParaPharaseDataset:
-    def __init__(self, dataset, model):
+    def __init__(self, dataset, model, paraphrase_file: str = None):
         self.dataset = dataset
         self.model = model
+        
+        self.num_additional_paraphrases = None
+        self.additional_paraphrases = None
+        paraphrase_file = os.path.join(self.dataset_path, paraphrase_file) if paraphrase_file is not None else None
+        if paraphrase_file is not None:
+            assert os.path.exists(paraphrase_file), f"Paraphrase file {paraphrase_file} does not exist."
+            self.additional_paraphrases = {item["uuid"]: item for item in load_jsonl(paraphrase_file)}
+            self.num_additional_paraphrases = max(len(item["auto_paraphrases"]) for item in self.additional_paraphrases.values()) + 1
+            self.num_additional_paraphrases += 1
 
         if not os.path.exists(self.dataset_root):
             os.makedirs(self.dataset_root, exist_ok=True)
-
         self.ds = self.load_dataset()
 
     @property
@@ -286,14 +293,14 @@ class WebQADataset(ParaPharaseDataset):
 
 class MyriadLamaDataset(ParaPharaseDataset):
 
-    def __init__(self, model_name, debug=False):
+    def __init__(self, model_name, debug=False, paraphrase_file: str = None):
         self.model_name = model_name
         self.debug = debug
         if self.debug:
             print("Debug mode: using a smaller subset of the dataset.")
-            super().__init__("myriadlama-debug", model_name)
+            super().__init__("myriadlama-debug", model_name, paraphrase_file)
         else:
-            super().__init__("myriadlama", model_name)
+            super().__init__("myriadlama", model_name, paraphrase_file)
 
     @property
     def dataset_root(self):
@@ -348,7 +355,7 @@ class MyriadLamaDataset(ParaPharaseDataset):
         ds.save_to_disk(self.dataset_path)
         return ds['test']
 
-    def get_dataloader(self, batch_size=8, shuffle=False):
+    def get_dataloader(self, batch_size=1, shuffle=False):
         return DataLoader(self.ds, batch_size=batch_size, collate_fn=self.collate_fn, shuffle=shuffle)
 
     def collate_fn(self, batch):
@@ -359,29 +366,35 @@ class MyriadLamaDataset(ParaPharaseDataset):
         for item in batch:
             uuid = item["uuid"]
             random.seed(uuid)
-            manual_list = item["manual_paraphrases"]
-            auto_list = item["auto_paraphrases"]
 
-            # Select exactly 5 manual + 5 auto paraphrases per item when available
-            if len(manual_list) < 5:
-                print(f"⚠️ MyriadLAMA uuid {uuid}: manual paraphrase count {len(manual_list)} < 5")
-            if len(auto_list) < 5:
-                print(f"⚠️ MyriadLAMA uuid {uuid}: auto paraphrase count {len(auto_list)} < 5")
+            if self.additional_paraphrases is not None:
+                assert uuid in self.additional_paraphrases, f"⚠️ MyriadLAMA uuid {uuid} not found in additional paraphrases file"
+                _paraphrases = [self.additional_paraphrases[uuid]["seed_prompt"]] + self.additional_paraphrases[uuid]["auto_paraphrases"]
+                is_origs.append([True] + [False]*len(self.additional_paraphrases[uuid]["auto_paraphrases"]))
+            else:
+                manual_list = item["manual_paraphrases"]
+                auto_list = item["auto_paraphrases"]
 
-            manual_sel = (
-                random.sample(manual_list, 5)
-                if len(manual_list) >= 5 else manual_list[:]
-            )
-            auto_sel = (
-                random.sample(auto_list, 5)
-                if len(auto_list) >= 5 else auto_list[:]
-            )
+                # Select exactly 5 manual + 5 auto paraphrases per item when available
+                if len(manual_list) < 5:
+                    print(f"⚠️ MyriadLAMA uuid {uuid}: manual paraphrase count {len(manual_list)} < 5")
+                if len(auto_list) < 5:
+                    print(f"⚠️ MyriadLAMA uuid {uuid}: auto paraphrase count {len(auto_list)} < 5")
 
-            merged = manual_sel + auto_sel
-            if len(merged) < 10:
-                print(f"⚠️ MyriadLAMA uuid {uuid}: total paraphrases {len(merged)} < 10 (after selection)")
-            paraphrases.append(merged)
-            is_origs.append([True]*5 + [False]*5)
+                manual_sel = (
+                    random.sample(manual_list, 5)
+                    if len(manual_list) >= 5 else manual_list[:]
+                )
+                auto_sel = (
+                    random.sample(auto_list, 5)
+                    if len(auto_list) >= 5 else auto_list[:]
+                )
+
+                _paraphrases = manual_sel + auto_sel
+                if len(_paraphrases) < 10:
+                    print(f"⚠️ MyriadLAMA uuid {uuid}: total paraphrases {len(_paraphrases)} < 10 (after selection)")
+                is_origs.append([True]*5 + [False]*5)
+            paraphrases.append(_paraphrases)
         return uuids, answers, list(zip(*paraphrases)), list(zip(*is_origs))
 
     def get_few_shot_examples(self, k=5, seed=42):
@@ -399,8 +412,8 @@ class MyriadLamaDataset(ParaPharaseDataset):
         return f"Q: {question}\nA: {answer}"
 
 class MyriadLama100Dataset(MyriadLamaDataset):
-    def __init__(self, model_name, debug=False):
-        super().__init__(model_name, debug)
+    def __init__(self, model_name, debug=False, paraphrase_file: str = None):
+        super().__init__(model_name, debug, paraphrase_file)
     
     @property
     def dataset_root(self):
@@ -428,7 +441,6 @@ class MyriadLama100Dataset(MyriadLamaDataset):
 
         return uuids, answers, list(zip(*paraphrases)), list(zip(*is_origs))
 
-
 class MultiChoiceParaphraseDataset(ParaPharaseDataset):
     """
     Base class for multi-choice QA paraphrase datasets.
@@ -440,15 +452,18 @@ class MultiChoiceParaphraseDataset(ParaPharaseDataset):
       - choices_label / choices_text / answer_label kept for reference
     """
 
-    def __init__(self, model_name, raw_path: str, dataset_type: str = "commonsense", debug=False):
+    def __init__(
+            self, model_name, raw_path: str, 
+            dataset_type: str = "commonsense", debug=False, 
+            paraphrase_file: str = None):
         self.model_name = model_name
         self.raw_dataset_path = raw_path
         self.dataset_type = dataset_type
         self.debug = debug
         if self.debug:
-            super().__init__(f"{dataset_type}", model_name)
+            super().__init__(f"{dataset_type}", model_name, paraphrase_file)
         else:
-            super().__init__(f"{dataset_type}-debug", model_name)
+            super().__init__(f"{dataset_type}-debug", model_name, paraphrase_file)
 
     @property
     def dataset_root(self):
@@ -492,6 +507,16 @@ Answer = <one letter>
     def instruction(self, instruction):
         self._instruction = instruction
     
+    def construct_prompts_with_paraphrases(self, few_shot_examples, paraphrases):
+        context = f"{self.instruction}\n\n{few_shot_examples}\n\n" if few_shot_examples else f"{self.instruction}\n\n"
+        paraphrase_qs = [f"Q: {question}\nA:" for question in paraphrases]
+        paraphrases = "".join(paraphrase_qs)
+        metadata = {
+            "len_context": len(context),
+            "len_paras": [len(question) for question in paraphrase_qs],
+        }
+        return f"{context}{paraphrases}", metadata
+
     def construct_multi_choice_prompts(self, few_shot_examples, paraphrases, choices_labels, choices_texts):
         options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_labels, choices_texts)])
         
@@ -505,7 +530,26 @@ Answer = <one letter>
             prompts.append(prompt)
         return prompts
     
+    def construct_prompts_single_para_qapair(self, few_shot_examples, paraphrases, choices_labels, choices_texts):
+        if few_shot_examples:
+            context_str = f"{self.instruction}\n\n{few_shot_examples}\n\nQuestion:\n"
+        else:
+            context_str = f"{self.instruction}\n\nQuestion:\n"
 
+        paraphrase_qs = [f"{question}\n" for question in paraphrases]
+        paraphrase_str = "".join(paraphrase_qs)
+        
+        options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_labels, choices_texts)])
+        answer_part = "Answer =" if self.choice_labels[0][0] == " " else "Answer = "
+        answer_str = f"\nOptions:\n{options_str}\n\n{answer_part}"
+    
+        metadata = {
+            "len_context": len(context_str),
+            "len_paras": [len(question) for question in paraphrase_qs],
+            "len_answer": len(answer_str),
+        }
+        return f"{context_str}{paraphrase_str}{answer_str}", metadata
+    
     def load_dataset(self):
         if os.path.exists(self.dataset_path):
             print(f"Dataset already exists at {self.dataset_path}. Loading from disk.")
@@ -520,7 +564,6 @@ Answer = <one letter>
         items = []
         for cnt, (orig_id, sdf) in tqdm(enumerate(df.groupby("orig_id")), desc=f"Processing {self.dataset_type} paraphrases", dynamic_ncols=True):
             sdf = sdf.sort_values("paraphrase_idx")
-            paraphrases = sdf["question"].tolist()
             first = sdf.iloc[0]
             labels = first["choices"]["label"]
             texts = first["choices"]["text"]
@@ -528,11 +571,20 @@ Answer = <one letter>
             answer_key = first["answerKey"]
             answer_text = label2text.get(answer_key, "")
             orig_question = first.get("orig_question", "")
+            
+            if self.additional_paraphrases is None:
+                _paraphrases = [orig_question] + sdf["question"].tolist()[:4]
+                _is_origs = [True] + [False] * 4
+            else:
+                assert orig_id in self.additional_paraphrases, f"⚠️ {self.dataset_type} uuid {orig_id} not found in additional paraphrases file"
+                _paraphrases = [self.additional_paraphrases[orig_id]["seed_prompt"]] + self.additional_paraphrases[orig_id]["auto_paraphrases"]
+                _is_origs = [True] + [False] * len(self.additional_paraphrases[orig_id]["auto_paraphrases"])
+
             items.append(
                 {
                     "uuid": orig_id,
-                    "paraphrases": [orig_question] + paraphrases[:4],
-                    "is_orig": [True] + [False]*4,
+                    "paraphrases": _paraphrases,
+                    "is_orig": _is_origs,
                     "answers": [answer_text],
                     "answer_label": answer_key,
                     "choices_label": labels,
@@ -541,7 +593,7 @@ Answer = <one letter>
                     "question_concept": first.get("question_concept", ""),
                 }
             )
-            if self.debug and cnt >= 100:
+            if self.debug and cnt >= 199:
                 break
 
         agg_ds = Dataset.from_pandas(pd.DataFrame(items))
@@ -552,16 +604,26 @@ Answer = <one letter>
         return DataLoader(self.ds, batch_size=batch_size, collate_fn=self.collate_fn, shuffle=shuffle)
 
     def collate_fn(self, batch):
-        uuids = [item["uuid"] for item in batch]
-        # answers = [item["answers"] for item in batch]
-        choices_labels = [item["choices_label"] for item in batch]
-        choices_texts = [item["choices_text"] for item in batch]
-        answer_labels = [item["answer_label"] for item in batch]
-        is_origs = [item["is_orig"] for item in batch]
-        paraphrases = []
+        uuids, choices_labels, choices_texts, answer_labels, is_origs, paraphrases = [], [], [], [], [], []
+        # uuids = [item["uuid"] for item in batch]
+        # choices_labels = [item["choices_label"] for item in batch]
+        # choices_texts = [item["choices_text"] for item in batch]
+        # answer_labels = [item["answer_label"] for item in batch]
+        # is_origs = [item["is_orig"] for item in batch]
+        # paraphrases = []
         for item in batch:
-            assert len(item["paraphrases"]) == 5, f"⚠️ {self.dataset_type} uuid {item['uuid']}: paraphrase count {len(item['paraphrases'])} != 5"
-            paraphrases.append(item["paraphrases"])
+            uuids.append(item["uuid"])
+            choices_labels.append(item["choices_label"])
+            choices_texts.append(item["choices_text"])
+            answer_labels.append(item["answer_label"])
+            if self.additional_paraphrases is None:
+                assert len(item["paraphrases"]) == 5, f"⚠️ {self.dataset_type} uuid {item['uuid']}: paraphrase count {len(item['paraphrases'])} != 5"
+                paraphrases.append(item["paraphrases"])
+                is_origs.append(item["is_orig"])
+            else:
+                _paraphrases = [self.additional_paraphrases[item["uuid"]]["seed_prompt"]] + self.additional_paraphrases[item["uuid"]]["auto_paraphrases"]
+                paraphrases.append(_paraphrases)
+                is_origs.append([True] + [False]*len(self.additional_paraphrases[item["uuid"]]["auto_paraphrases"]))
         return uuids, answer_labels, list(zip(*paraphrases)), choices_labels, choices_texts, answer_labels, list((zip(*is_origs)))
 
     def get_few_shot_examples(self, k=5, seed=42, is_ppl_format=False):
@@ -581,11 +643,10 @@ Answer = <one letter>
             options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_label, choices_text)])
             return f"Question:\n{question}\n\nOptions:\n{options_str}\n\nAnswer = {answer_label}"
 
-
 class CommonsenseParaphraseDataset(MultiChoiceParaphraseDataset):
     """Commonsense QA paraphrase dataset."""
-    def __init__(self, model_name, raw_path: str = COMMONSENSE_PARAPHRASE_PATH, debug=False):
-        super().__init__(model_name, raw_path, dataset_type="commonsense", debug=debug)
+    def __init__(self, model_name, raw_path: str = COMMONSENSE_PARAPHRASE_PATH, debug=False, paraphrase_file: str = None):
+        super().__init__(model_name, raw_path, dataset_type="commonsense", debug=debug, paraphrase_file=paraphrase_file)
 
     @property
     def choice_labels(self):
@@ -595,11 +656,10 @@ class CommonsenseParaphraseDataset(MultiChoiceParaphraseDataset):
     def choice_labels(self, labels):
         self._choice_labels = labels
 
-
 class MMLUParaphraseDataset(MultiChoiceParaphraseDataset):
     """MMLU (Massive Multitask Language Understanding) paraphrase dataset."""
-    def __init__(self, model_name, raw_path: str = MMLA_PARAPHRASE_PATH, debug=False):
-        super().__init__(model_name, raw_path, dataset_type="mmlu", debug=debug)
+    def __init__(self, model_name, raw_path: str = MMLA_PARAPHRASE_PATH, debug=False, paraphrase_file: str = None):
+        super().__init__(model_name, raw_path, dataset_type="mmlu", debug=debug, paraphrase_file=paraphrase_file)
 
     @property
     def choice_labels(self):
@@ -611,8 +671,8 @@ class MMLUParaphraseDataset(MultiChoiceParaphraseDataset):
 
 class LogiQAParaphraseDataset(MultiChoiceParaphraseDataset):
     """LogiQA paraphrase dataset."""
-    def __init__(self, model_name, raw_path: str = LOGIQA_PARAPHRASE_PATH, debug=False):
-        super().__init__(model_name, raw_path, dataset_type="logiqa", debug=debug)
+    def __init__(self, model_name, raw_path: str = LOGIQA_PARAPHRASE_PATH, debug=False, paraphrase_file: str = None):
+        super().__init__(model_name, raw_path, dataset_type="logiqa", debug=debug, paraphrase_file=paraphrase_file)
 
     @property
     def choice_labels(self):
@@ -626,21 +686,19 @@ class LogiQAParaphraseDataset(MultiChoiceParaphraseDataset):
 class HotpotDataset(ParaPharaseDataset):
     """HotpotQA paraphrase dataset: 1 manual + 10 auto paraphrases per uuid."""
 
-    def __init__(self, model_name, debug=False):
+    def __init__(self, model_name, debug=False, paraphrase_file: str = None):
         self.model_name = model_name
         self.debug = debug
         if self.debug:
             print("Debug mode: using a smaller subset of the dataset.")
-            super().__init__("hotpot-debug", model_name)
+            super().__init__("hotpot-debug", model_name, paraphrase_file)
         else:
-            super().__init__("hotpot", model_name)
+            super().__init__("hotpot", model_name, paraphrase_file)
 
     @property
     def dataset_root(self):
         if self.debug:
-            return os.path.join(
-                PROJECT_DATASET_ROOT, "hotpot-debug", self.model_name
-            )
+            return os.path.join(PROJECT_DATASET_ROOT, "hotpot-debug", self.model_name)
         else:
             return os.path.join(PROJECT_DATASET_ROOT, "hotpot", self.model_name)
 
@@ -698,7 +756,7 @@ class HotpotDataset(ParaPharaseDataset):
                 "auto_paraphrases": auto_paraphrases
             })
 
-            if self.debug and idx >= 100:
+            if self.debug and idx >= 199:
                 break
 
         print(f"✓ Processed {len(items)} items")
@@ -718,17 +776,24 @@ class HotpotDataset(ParaPharaseDataset):
         uuids = [item["uuid"] for item in batch]
         answers = [item["answers"] for item in batch]
         paraphrases = []
-        is_orgs = []
+        is_origs = []
         for item in batch:
             uuid = item["uuid"]
             random.seed(uuid)
-            manual_list = item["manual_paraphrases"]
-            auto_list = item["auto_paraphrases"]
-            merged = manual_list + auto_list
-            assert len(merged) == 5, f"⚠️ Hotpot uuid {uuid}: total paraphrases {len(merged)} != 5"
-            paraphrases.append(merged)
-            is_orgs.append([True] + [False]*4)
-        return uuids, answers, list(zip(*paraphrases)), list(zip(*is_orgs))
+
+            if self.additional_paraphrases is not None:
+                assert uuid in self.additional_paraphrases, f"⚠️ Hotpot uuid {uuid} not found in additional paraphrases file"
+                _paraphrases = [self.additional_paraphrases[uuid]["seed_prompt"]] + self.additional_paraphrases[uuid]["auto_paraphrases"]
+                _is_origs = [True] + [False] * len(self.additional_paraphrases[uuid]["auto_paraphrases"])
+            else:
+                manual_list = item["manual_paraphrases"]
+                auto_list = item["auto_paraphrases"]
+                _paraphrases = manual_list + auto_list
+                _is_origs = [True] + [False] * 4
+                assert len(_paraphrases) == 5, f"⚠️ Hotpot uuid {uuid}: total paraphrases {len(_paraphrases)} != 5"
+            paraphrases.append(_paraphrases)
+            is_origs.append(_is_origs)
+        return uuids, answers, list(zip(*paraphrases)), list(zip(*is_origs))
 
     def get_few_shot_examples(self, k=5, seed=42):
         if not os.path.exists(self.dataset_path):
@@ -743,3 +808,27 @@ class HotpotDataset(ParaPharaseDataset):
         question = example["manual_paraphrases"][0] if isinstance(example["manual_paraphrases"], list) else example["manual_paraphrases"]
         answer = example["answers"][0] if isinstance(example["answers"], list) else example["answers"]
         return f"Q: {question}\nA: {answer}"
+    
+def get_dataset_instance(dataset_name, model_name, debug=False, additional_paraphrases_file=None):
+    if dataset_name == "webqa":
+        from dataset import WebQADataset
+        dataset = WebQADataset(model_name=model_name)
+    elif dataset_name == "myriadlama":
+        from dataset import MyriadLamaDataset
+        dataset = MyriadLamaDataset(model_name=model_name, debug=debug, paraphrase_file=additional_paraphrases_file)
+    elif dataset_name == "commonsense":
+        from dataset import CommonsenseParaphraseDataset
+        dataset = CommonsenseParaphraseDataset(model_name=model_name, debug=debug, paraphrase_file=additional_paraphrases_file)
+    elif dataset_name == "mmlu":
+        from dataset import MMLUParaphraseDataset
+        dataset = MMLUParaphraseDataset(model_name=model_name, debug=debug, paraphrase_file=additional_paraphrases_file)
+    elif dataset_name == "logiqa":
+        from dataset import LogiQAParaphraseDataset
+        dataset = LogiQAParaphraseDataset(model_name=model_name, debug=debug, paraphrase_file=additional_paraphrases_file)
+    elif dataset_name == "hotpot":
+        from dataset import HotpotDataset
+        dataset = HotpotDataset(model_name=model_name, debug=debug, paraphrase_file=additional_paraphrases_file)
+    else:
+        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', or 'logiqa'.")
+    
+    return dataset

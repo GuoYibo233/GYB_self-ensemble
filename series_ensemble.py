@@ -522,6 +522,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--model", type=str, default="llama3.2_3b_it", help="Model name from constants.MODEL_PATHs")
     parser.add_argument("--device", type=str, default="auto", help="Device for model (default: auto)")
+    parser.add_argument(
+        "--dataset", type=str, required=True, 
+        choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa", "hotpot"], 
+        help="Dataset to use for generating paraphrases.")
     parser.add_argument("--lemmaize", action="store_true", help="Normalize predictions and answers to lemmas")
     parser.add_argument("--modify_rope", action="store_true", help="Modify RoPE embeddings during generation")
     parser.add_argument("--modify_attn", action="store_true", help="Modify attention masks using FlexAttention")
@@ -541,7 +545,26 @@ if __name__ == "__main__":
     assert int(args.explicit_prompts) + int(args.single_para_qapair) <= 1, \
         "Cannot use both --explicit_prompts and --single_para_qapair together."
 
-    dataset = MyriadLamaDataset(model_name=args.model, debug=args.debug)
+    if args.dataset == "webqa":
+        from dataset import WebQADataset
+        dataset = WebQADataset(model_name=args.model)
+    elif args.dataset == "myriadlama":
+        from dataset import MyriadLamaDataset
+        dataset = MyriadLamaDataset(model_name=args.model, debug=args.debug)
+    elif args.dataset == "commonsense":
+        from dataset import CommonsenseParaphraseDataset
+        dataset = CommonsenseParaphraseDataset(model_name=args.model, debug=args.debug)
+    elif args.dataset == "mmlu":
+        from dataset import MMLUParaphraseDataset
+        dataset = MMLUParaphraseDataset(model_name=args.model, debug=args.debug)
+    elif args.dataset == "logiqa":
+        from dataset import LogiQAParaphraseDataset
+        dataset = LogiQAParaphraseDataset(model_name=args.model, debug=args.debug)
+    elif args.dataset == "hotpot":
+        from dataset import HotpotDataset
+        dataset = HotpotDataset(model_name=args.model, debug=args.debug)
+    else:
+        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', 'logiqa', or 'hotpot'.")
     
     if args.model not in MODEL_PATHs:
         raise ValueError(f"Model {args.model} not supported. Choose from {list(MODEL_PATHs.keys())}")
@@ -549,6 +572,7 @@ if __name__ == "__main__":
 
     # Determine file name based on number of paraphrases
     dump_file = f"{dataset.dataset_root}/myriadlama."
+    dump_file = f"{dataset.dataset_root}/{args.dataset}."
     if args.modify_attn:
         dump_file += "modifyattn."
     if args.modify_rope:
@@ -588,10 +612,22 @@ if __name__ == "__main__":
 
     sample_count = 0
     samples = []
-    for uuids, answers, all_paraphrases in tqdm(dataloader, dynamic_ncols=True):
-        assert len(uuids) == 1, "Batch size must be 1 for MyriadLAMA generation"
+    for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
+        if dataset.is_multi_choice:
+            uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels, _ = batch_data
+        else:
+            uuids, answers, all_paraphrases, _ = batch_data
+            choices_labels = [None] * len(uuids)
+            choices_texts = [None] * len(uuids)
+            answer_labels = [None] * len(uuids)
+            
+        assert len(uuids) == 1, "Batch size for data preparation must be 1 for MyriadLAMA generation"
         uuid, answer = uuids[0], answers[0]
+        choices_labels = choices_labels[0]
+        choices_texts = choices_texts[0]
+        answer_labels = answer_labels[0]
         all_paraphrases = list(zip(*all_paraphrases))[0]
+        
         all_indices = list(range(len(all_paraphrases)))
         
         if args.repeat_paras:
@@ -604,7 +640,7 @@ if __name__ == "__main__":
         random.seed(uuids[0])
         for paraids in random.sample(list(all_sampled_paras), k=args.num_samples):
             sampled_paraphrases = [all_paraphrases[i] for i in paraids]
-            samples.append((uuid, answer, sampled_paraphrases))
+            samples.append((uuid, answer, sampled_paraphrases, choices_labels, choices_texts, answer_labels))
 
     print(f"Total samples to generate: {len(samples)}")
     sample_dataloader = torch.utils.data.DataLoader(
@@ -616,7 +652,7 @@ if __name__ == "__main__":
     )
 
     for batch in tqdm(sample_dataloader, dynamic_ncols=True):
-        uuids, answers, sampled_paraphrases = zip(*batch)
+        uuids, answers, sampled_paraphrases, choices_labels, choices_texts, answer_labels = zip(*batch)
         batch_predictions = []
         batch_generations = []
         batch_templates = []
@@ -627,13 +663,13 @@ if __name__ == "__main__":
         else:
             if args.single_para_qapair:
                 prompt, segment_metadata = dataset.construct_prompts_single_para_qapair(
-                    few_shot_examples, paraphrases=sampled_paraphrases[0]
+                    few_shot_examples, paraphrases=sampled_paraphrases[0], choices_labels=choices_labels[0], choices_texts=choices_texts[0]
                 )
             else:
                 prompt, segment_metadata = dataset.construct_prompts_with_paraphrases(
                     few_shot_examples, paraphrases=sampled_paraphrases[0]
                 )
-                
+        
         # Generate using MyriadLAMA-specific FlexAttention
         generation = myriadlama_flex_generation(
             prompt, segment_metadata, max_new_tokens=max_new_tokens, modify_rope=args.modify_rope, has_bos=has_bos

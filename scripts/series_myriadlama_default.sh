@@ -3,6 +3,7 @@
 DEVICE=$1
 MODEL_TYPE=${2:-base}
 NUM_FEWSHOTS=${3:-5}
+DATASET="myriadlama"
 NUM_PARAS=5
 
 if [ "$MODEL_TYPE" == "base" ]; then
@@ -14,51 +15,52 @@ elif [ "$MODEL_TYPE" == "others" ]; then
 fi
 
 for MODEL in $MODELS; do
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
-        --model $MODEL \
-        --single_para_qapair \
-        --num_paraphrases $NUM_PARAS \
-        --num_fewshots $NUM_FEWSHOTS
+    # CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
+    #     --model $MODEL \
+    #     --single_para_qapair \
+    #     --num_paraphrases $NUM_PARAS \
+    #     --num_fewshots $NUM_FEWSHOTS
 
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
-        --model $MODEL \
-        --single_para_qapair \
-        --num_paraphrases $NUM_PARAS \
-        --num_fewshots $NUM_FEWSHOTS \
-        --scale_factor
+    # CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
+    #     --model $MODEL \
+    #     --single_para_qapair \
+    #     --num_paraphrases $NUM_PARAS \
+    #     --num_fewshots $NUM_FEWSHOTS \
+    #     --scale_factor
 
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
-        --model $MODEL \
-        --single_para_qapair \
-        --num_paraphrases $NUM_PARAS \
-        --num_fewshots $NUM_FEWSHOTS \
-        --modify_attn
+    # CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
+    #     --model $MODEL \
+    #     --single_para_qapair \
+    #     --num_paraphrases $NUM_PARAS \
+    #     --num_fewshots $NUM_FEWSHOTS \
+    #     --modify_attn
     
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
-        --model $MODEL \
-        --single_para_qapair \
-        --num_paraphrases $NUM_PARAS \
-        --num_fewshots $NUM_FEWSHOTS \
-        --modify_attn \
-        --scale_factor
+    # CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
+    #     --model $MODEL \
+    #     --single_para_qapair \
+    #     --num_paraphrases $NUM_PARAS \
+    #     --num_fewshots $NUM_FEWSHOTS \
+    #     --modify_attn \
+    #     --scale_factor
 
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
-        --model $MODEL \
-        --single_para_qapair \
-        --num_paraphrases $NUM_PARAS \
-        --num_fewshots $NUM_FEWSHOTS \
-        --modify_rope
+    # CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
+    #     --model $MODEL \
+    #     --single_para_qapair \
+    #     --num_paraphrases $NUM_PARAS \
+    #     --num_fewshots $NUM_FEWSHOTS \
+    #     --modify_rope
 
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
-        --model $MODEL \
-        --single_para_qapair \
-        --num_paraphrases $NUM_PARAS \
-        --num_fewshots $NUM_FEWSHOTS \
-        --modify_attn \
-        --modify_rope
+    # CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
+    #     --model $MODEL \
+    #     --single_para_qapair \
+    #     --num_paraphrases $NUM_PARAS \
+    #     --num_fewshots $NUM_FEWSHOTS \
+    #     --modify_attn \
+    #     --modify_rope
         
     CUDA_VISIBLE_DEVICES=$DEVICE python3 series_ensemble.py \
         --model $MODEL \
+        --dataset $DATASET \
         --single_para_qapair \
         --num_paraphrases $NUM_PARAS \
         --num_fewshots $NUM_FEWSHOTS \

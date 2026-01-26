@@ -67,7 +67,10 @@ def calculate_accuracy(df, label, is_multichoice, birdirect=True, use_generation
         answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
         try:
             if use_generation:
-                generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]
+                try:
+                    generations = [[pred.tolist()] for pred in df["generation_lemmas"].tolist()]
+                except Exception as e:
+                    generations = df["generation_lemmas"].tolist()
                 scores = partial_match_scores_use_generation(generations, answers, birdirect=birdirect, is_multichoice=is_multichoice)
             else:
                 predicts = df["predict_lemma"].tolist()
@@ -174,7 +177,7 @@ def calculate_series_ensemble_accuracy(
 def report_series_ensemble_accuracy_by_nparas(
         dump_file_prefix, 
         single_para_qapair, explicit_prompts, 
-        repeat_paras, num_fewshots,
+        repeat_paras, num_fewshots, num_samples,
         modifyattn, modifyrope, scale_score):
     
     # for num_paraphrases in [2, 3, 4, 5]:
@@ -183,7 +186,7 @@ def report_series_ensemble_accuracy_by_nparas(
             dump_file_prefix=dump_file_prefix, 
             single_para_qapair=single_para_qapair, explicit_prompts=explicit_prompts, repeat_paras=repeat_paras, 
             modifyattn=modifyattn, modifyrope=modifyrope, scale_score=scale_score, 
-            num_paraphrases=num_paraphrases, num_fewshots=num_fewshots, num_samples=5)
+            num_paraphrases=num_paraphrases, num_fewshots=num_fewshots, num_samples=num_samples)
     
 def report_series_ensemble_accuracy_by_nshot(
         dump_file_prefix, 

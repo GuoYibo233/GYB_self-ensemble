@@ -12,6 +12,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from constants import MODEL_PATHs
+from dataset import get_dataset_instance
 from utils import append_lemmas, get_label_prob, init_spacy, lemmaize_chunk
 
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
@@ -39,11 +40,15 @@ def ensemble_generation(
     model.generation_config.pad_token_id = tokenizer.eos_token_id
 
     generated = None
+    past_key_values = None
     inputs = tokenizer(
         prompts, return_tensors="pt", 
         padding=True, truncation=True,
         padding_side='left', return_attention_mask=True).to(model.device)
-
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs["attention_mask"]
+    
+    current_model_input = input_ids
     max_layer = len(_get_blocks(model))
     if multilayer:
         layer_indices = list(range(ensemble_layer_idx, max_layer))
@@ -54,15 +59,22 @@ def ensemble_generation(
     for step in range(max_new_tokens):
         with torch.no_grad():
             if ensemble_method is None:
-                logits = model(inputs["input_ids"], attention_mask=inputs["attention_mask"]).logits[:, -1, :]
+                outputs = model(
+                    input_ids=current_model_input,
+                    attention_mask=attention_mask,
+                    use_cache=True,
+                    past_key_values=past_key_values
+                )
+                logits = outputs.logits[:, -1, :]
+                past_key_values = outputs.past_key_values
             elif ensemble_method == "layer_output_avg":
                 logits = next_token_logits_with_weighted_layer_outavg(
-                    model, inputs['input_ids'], inputs['attention_mask'], 
+                    model, input_ids, attention_mask, 
                     layer_indices=layer_indices, alpha=ensemble_alpha, 
                     weights=None, token_mode=token_mode)
             elif ensemble_method.startswith("ffn_activation"):
                 logits = next_token_logits_with_weighted_ffn_midavg(
-                    model, inputs['input_ids'], inputs['attention_mask'],
+                    model, input_ids, attention_mask,
                     layer_indices=layer_indices, alpha=ensemble_alpha, 
                     weights=None, token_mode=token_mode, use_max=(ensemble_method=="ffn_activation_max"))
             else:
@@ -95,16 +107,17 @@ def ensemble_generation(
         if step == 0 and choice_labels is not None:
             label_probs = get_label_prob(tokenizer, logits, choice_labels)
         
-        # Take the element-wise min across the two distributions
-        # Append next token to input_ids for next round
-        inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token.expand(inputs["input_ids"].size(0), -1)], dim=1)
-        inputs["attention_mask"] = torch.cat([inputs["attention_mask"], torch.ones(inputs["attention_mask"].size(0), 1, device=model.device)], dim=1)
-
+        # inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token.expand(inputs["input_ids"].size(0), -1)], dim=1)
+        # inputs["attention_mask"] = torch.cat([inputs["attention_mask"], torch.ones(inputs["attention_mask"].size(0), 1, device=model.device)], dim=1)
+        input_ids = torch.cat([input_ids, next_token.expand(input_ids.size(0), -1)], dim=1)
+        attention_mask = torch.cat([attention_mask, torch.ones(attention_mask.size(0), 1, device=model.device)], dim=1)
+        
         if generated is None:
             generated = next_token
         else:
             generated = torch.cat([generated, next_token], dim=1)
 
+        current_model_input = next_token.repeat(input_ids.size(0), 1)
         decoded_token = tokenizer.decode(next_token[0], skip_special_tokens=False)
         # Check for EOS or newline (likely end of one-word answer)
         if next_token.item() == tokenizer.eos_token_id:
@@ -152,32 +165,24 @@ def sample_paraphrases_per_item(uuids, all_paraphrases, all_is_origs, num_paraph
         item_paraphrases = [all_paraphrases[i][item_idx] for i in range(num_paraphrase_versions)]
         item_is_origs = [all_is_origs[i][item_idx] for i in range(num_paraphrase_versions)]
         
+        # Handle special case: use all paraphrases
+        if num_paraphrases == -1: 
+            sampled_paraphrases = item_paraphrases
+            sammpled_is_origs = item_is_origs
+            all_samples.append((uuid, sampled_paraphrases, sammpled_is_origs))
+            continue
+        
         # Generate all possible combinations
         all_indices = list(range(len(item_paraphrases)))
-        # Warn and clamp if requested num_paraphrases exceeds available versions
-        if num_paraphrases > len(all_indices):
-            print(
-                f"⚠️ uuid {uuid}: requested num_paraphrases={num_paraphrases} exceeds available={len(all_indices)};"
-                f" clamping to {len(all_indices)}"
-            )
-            effective_num_paraphrases = len(all_indices)
-        else:
-            effective_num_paraphrases = num_paraphrases
-        
-        if repeat_paras:
-            # Repeat same paraphrase: [[0,0], [1,1], [2,2], ...]
+        effective_num_paraphrases = num_paraphrases if num_paraphrases <= len(all_indices) else len(all_indices)
+        if repeat_paras: # Repeat same paraphrase: [[0,0], [1,1], [2,2], ...]
             all_sampled_paras = list([[n] * effective_num_paraphrases for n in all_indices])
-        else:
-            # Use permutations: all ordered selections of num_paraphrases from available paraphrases
+        else: # Use permutations: all ordered selections of num_paraphrases from available paraphrases
             all_sampled_paras = itertools.permutations(all_indices, effective_num_paraphrases)
-        
-        # Set random seed based on uuid to ensure deterministic sampling (same as series_ensemble.py)
+
         random.seed(uuid)
-        
-        # Sample num_samples different combinations
         all_sampled_paras_list = list(all_sampled_paras)
         sampled_combinations = random.sample(all_sampled_paras_list, k=min(num_samples, len(all_sampled_paras_list)))
-        # For each combination, extract the actual paraphrases
         for paraids in sampled_combinations:
             sampled_paraphrases = [item_paraphrases[i] for i in paraids]
             sammpled_is_origs = [item_is_origs[i] for i in paraids]
@@ -434,28 +439,16 @@ if __name__ == "__main__":
     parser.add_argument("--token_mode", type=str, default="last", choices=["last", "all"], help="Token mode")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose output")
     parser.add_argument("--rewrite", action="store_true", help="Rewrite existing output files")
+    parser.add_argument("--additional_paraphrases_file", type=str, default=None, help="Path to additional paraphrases file (for datasets that support it)")
     args = parser.parse_args()    
 
-    if args.dataset == "webqa":
-        from dataset import WebQADataset
-        dataset = WebQADataset(model_name=args.model)
-    elif args.dataset == "myriadlama":
-        from dataset import MyriadLamaDataset
-        dataset = MyriadLamaDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "commonsense":
-        from dataset import CommonsenseParaphraseDataset
-        dataset = CommonsenseParaphraseDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "mmlu":
-        from dataset import MMLUParaphraseDataset
-        dataset = MMLUParaphraseDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "logiqa":
-        from dataset import LogiQAParaphraseDataset
-        dataset = LogiQAParaphraseDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "hotpot":
-        from dataset import HotpotDataset
-        dataset = HotpotDataset(model_name=args.model, debug=args.debug)
-    else:
-        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', 'logiqa', or 'hotpot'.")
+    # Load dataset
+    dataset = get_dataset_instance(
+        dataset_name=args.dataset,
+        model_name=args.model,
+        debug=args.debug,
+        additional_paraphrases_file=args.additional_paraphrases_file,
+    )
     
     if args.model.startswith("phi3") and dataset.is_multi_choice:
         dataset.choice_labels = [label.strip() for label in dataset.choice_labels]
