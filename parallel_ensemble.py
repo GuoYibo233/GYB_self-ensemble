@@ -9,11 +9,15 @@ import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from constants import MODEL_PATHs
 from dataset import get_dataset_instance
-from utils import append_lemmas, get_label_prob, init_spacy, lemmaize_chunk
+from utils import (
+    append_lemmas,
+    get_label_prob,
+    init_spacy,
+    lemmaize_chunk,
+    load_model_tokenizer,
+)
 
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
@@ -116,7 +120,7 @@ def ensemble_generation(
             generated = next_token
         else:
             generated = torch.cat([generated, next_token], dim=1)
-
+        
         current_model_input = next_token.repeat(input_ids.size(0), 1)
         decoded_token = tokenizer.decode(next_token[0], skip_special_tokens=False)
         # Check for EOS or newline (likely end of one-word answer)
@@ -415,49 +419,7 @@ def next_token_logits_with_weighted_ffn_midavg(
     next_logits = logits[torch.arange(B, device=logits.device), last_pos]  # [B,V]
     return next_logits
 
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Ensemble generation")
-    parser.add_argument("--model", type=str, default="llama3.2_3b_it", help="Path to the pre-trained model.")
-    parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa", "hotpot"], help="Dataset to use for generating paraphrases.")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on (default: cuda).")
-    parser.add_argument("--num_paraphrases", type=int, default=5, help="Number of paraphrases to use in each sample (default: 2)")
-    parser.add_argument("--num_samples", type=int, default=5, help="Number of different paraphrase combinations to generate per question (default: 5)")
-    parser.add_argument("--num_fewshots", type=int, default=5, help="Number of few-shot examples to use (default: 5)")
-    parser.add_argument("--repeat_paras", action="store_true", help="Repeat the same paraphrase multiple times instead of using permutations")
-    parser.add_argument("--max_samples", type=int, default=None, help="Maximum number of samples to generate (default: None, process all)")
-    
-    parser.add_argument("--logits_ensemble_method", type=str, default="avg", choices=["max", "avg", "weighted_avg", "weighted_max"],
-                        help="Integration method for ensemble generation")
-    
-    parser.add_argument("--ensemble_method", type=str, default=None, 
-                        choices=["layer_output_avg", "ffn_activation_avg", "ffn_activation_max"], 
-                        help="Method for ensemble internal states within Transformer layers, by either using layer outputs or FFN activations")
-    parser.add_argument("--ensemble_layer", type=int, default=16, help="Transformer layer index to apply ensemble merging")
-    parser.add_argument("--ensemble_alpha", type=float, default=1.0, help="alpha for ensemble merging of transformer outputs")
-    parser.add_argument("--multilayer", action="store_true", help="Use only a single layer's output for ensemble (not used currently)")
-    parser.add_argument("--token_mode", type=str, default="last", choices=["last", "all"], help="Token mode")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose output")
-    parser.add_argument("--rewrite", action="store_true", help="Rewrite existing output files")
-    parser.add_argument("--additional_paraphrases_file", type=str, default=None, help="Path to additional paraphrases file (for datasets that support it)")
-    args = parser.parse_args()    
-
-    # Load dataset
-    dataset = get_dataset_instance(
-        dataset_name=args.dataset,
-        model_name=args.model,
-        debug=args.debug,
-        additional_paraphrases_file=args.additional_paraphrases_file,
-    )
-    
-    if args.model.startswith("phi3") and dataset.is_multi_choice:
-        dataset.choice_labels = [label.strip() for label in dataset.choice_labels]
-    
-    if args.model not in MODEL_PATHs:
-        raise ValueError(f"Model {args.model} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
-    model_path = MODEL_PATHs.get(args.model, args.model)
-    
-    # Use dataset name for output file prefix
+def get_parallel_ensemble_dumpfile(dataset, args):
     dataset_name = getattr(dataset, 'name', None) or getattr(dataset, '__class__', type(dataset)).__name__.replace('Dataset', '').lower()
     dump_file = f"{dataset.dataset_root}/{dataset_name}.logits.{args.logits_ensemble_method}."
     if args.repeat_paras:
@@ -471,11 +433,13 @@ if __name__ == "__main__":
         dump_file += f"maxffn.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
     if args.multilayer:
         dump_file += "multilayer."
+    if args.additional_paraphrases_file is not None:
+        dump_file += "selfparas."
     if args.num_fewshots != 5:
         dump_file += f"{args.num_fewshots}fshots."
     
     dump_file += f"{args.num_samples}samples.{args.num_paraphrases}paras.feather"
-    
+
     # If user is y-guo, ensure dump_file is saved to /home/y-guo/self-ensemble
     _current_user = os.environ.get('USER', 'unknown')
     if _current_user == 'y-guo':
@@ -486,22 +450,118 @@ if __name__ == "__main__":
                 dump_file = "/home/y-guo/self-ensemble/" + os.path.basename(dump_file)
         print(f"ℹ️  User y-guo detected, saving to: {dump_file}")
     
+    return dump_file
+
+def craft_prompts_with_reasoning_path(dataset, tokenizer, baseline_file):
+    """
+    Craft prompts for reasoning tasks using existing baseline generations.
+    The baseline_file should contain columns: uuid, question, baseline_generation
+    """
+    df = pd.read_feather(baseline_file)
+    def craft_thinking_prompts(prompts, thinkings):
+        messages = []
+        for prompt in prompts:
+            messages.append([
+                {
+                    "role": "system",
+                    "content": dataset.instruction,
+                },
+                {
+                    "role": "user", 
+                    "content": prompt
+                }
+            ])
+        messages = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True
+        )
+        return [f"{message}{thinking}" for message, thinking in zip(messages, thinkings)]
+
+    for uuid, subdf in df.groupby('uuid'):
+        subdf = subdf.reset_index(drop=True)
+        subdf = subdf[subdf['thinking'].str.len() > 0]
+        if len(subdf) == 0:
+            print(f"⚠️  Warning: No valid reasoning entries for uuid {uuid}, skipping.")
+            continue
+
+        paraphrases = craft_thinking_prompts(subdf["prompt"].tolist(), subdf["thinking"].tolist())
+        paraphrases = [(paraphrase, ) for paraphrase in paraphrases]
+        is_origs = [(is_orig,) for is_orig in subdf["is_orig"].tolist()]
+        yield (
+            [uuid], 
+            [subdf['answers'].tolist()[0].tolist()],
+            paraphrases, 
+            is_origs,
+        )
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Ensemble generation")
+    parser.add_argument("--model", type=str, default="llama3.2_3b_it", help="Path to the pre-trained model.")
+    parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa", "hotpot"], help="Dataset to use for generating paraphrases.")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on (default: cuda).")
+    parser.add_argument("--num_paraphrases", type=int, default=-1, help="Number of paraphrases to use in each sample (default: 2)")
+    parser.add_argument("--num_samples", type=int, default=1, help="Number of different paraphrase combinations to generate per question (default: 5)")
+    parser.add_argument("--num_fewshots", type=int, default=0, help="Number of few-shot examples to use (default: 5)")
+    parser.add_argument("--repeat_paras", action="store_true", help="Repeat the same paraphrase multiple times instead of using permutations")
+    parser.add_argument("--max_samples", type=int, default=None, help="Maximum number of samples to generate (default: None, process all)")
+    
+    parser.add_argument("--logits_ensemble_method", type=str, default="avg", choices=["max", "avg", "weighted_avg", "weighted_max"],
+                        help="Integration method for ensemble generation")
+    
+    parser.add_argument("--ensemble_method", type=str, default=None, 
+                        choices=["layer_output_avg", "ffn_activation_avg", "ffn_activation_max"], 
+                        help="Method for ensemble internal states within Transformer layers, by either using layer outputs or FFN activations")
+    parser.add_argument("--ensemble_layer", type=int, default=16, help="Transformer layer index to apply ensemble merging")
+    parser.add_argument("--ensemble_alpha", type=float, default=1.0, help="alpha for ensemble merging of transformer outputs")
+    parser.add_argument("--multilayer", action="store_true", help="Use only a single layer's output for ensemble (not used currently)")
+    parser.add_argument("--token_mode", type=str, default="last", choices=["last", "all"], help="Token mode")
+    parser.add_argument("--reasoning", action="store_true", help="Enable reasoning mode (not used currently)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose output")
+    parser.add_argument("--rewrite", action="store_true", help="Rewrite existing output files")
+    
+    parser.add_argument("--additional_paraphrases_file", type=str, default=None, help="Path to additional paraphrases file (for datasets that support it)")
+    parser.add_argument("--baseline_file", type=str, default=None, help="Path to baseline generations file (required for reasoning mode)")
+    args = parser.parse_args()    
+
+    # Load dataset
+    dataset = get_dataset_instance(
+        dataset_name=args.dataset,
+        model_name=args.model,
+        debug=args.debug,
+        reasoning=args.reasoning,
+        num_paraphrases=args.num_paraphrases,
+        additional_paraphrases_file=args.additional_paraphrases_file,
+    )
+
+    # Load model and tokenizer
+    model, tokenizer = load_model_tokenizer(args.model)
+    max_new_tokens = 10 if args.num_fewshots > 0 else 20
+    
+    if not args.reasoning:
+        dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
+    else:
+        assert args.reasoning and \
+            args.baseline_file is not None and \
+            dataset.is_multi_choice == False, \
+            "Reasoning mode requires baseline_file and non-multi-choice dataset."
+        dataloader = craft_prompts_with_reasoning_path(dataset, tokenizer, args.baseline_file)
+    
+    # Determine dump file path
+    if args.baseline_file is not None:
+        dataset.dataset_root = os.path.join(dataset.dataset_root, os.path.basename(args.baseline_file).replace('.feather', ''))
+        os.makedirs(dataset.dataset_root, exist_ok=True)
+    dump_file = get_parallel_ensemble_dumpfile(dataset, args)    
     if os.path.exists(dump_file) and not args.rewrite:
         print(f"✅ File {dump_file} already exists, skipping generation.")
         exit(0)
 
-    max_new_tokens = 10 if args.num_fewshots > 0 else 20
-    dataloader = dataset.get_dataloader(batch_size=8, shuffle=False)
-
     print(f"🔄 Starting {args.logits_ensemble_method} logits ensembling to {dump_file}")
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
-    # model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", dtype="auto")
-    
     if args.logits_ensemble_method.startswith("weighted_"):
         conf_df = pd.read_feather(os.path.join(dataset.dataset_root, "confidence.feather"))
-
+    
     df = pd.DataFrame(columns=["uuid", "answers", "prediction", "generation"])
     if args.max_samples:
         print(f"Processing maximum {args.max_samples} samples")
@@ -509,7 +569,6 @@ if __name__ == "__main__":
     few_shot_examples = dataset.get_few_shot_examples(k=args.num_fewshots) if args.num_fewshots > 0 else ""
 
     all_samples = []
-
     uuid_count = 0
     for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
         if dataset.is_multi_choice:
@@ -633,14 +692,10 @@ if __name__ == "__main__":
         
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
 
+    
     chunks = np.array_split(df, num_parts)
     with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
         results = pool.map(lemmaize_chunk, chunks)
-    try:
-        df = append_lemmas(df, results)
-    except Exception as e:
-        print(f"❌ Lemmatization failed: {type(e).__name__}: {e}")
-        set_trace()
-    finally:
-        df.to_feather(dump_file)
-        print(f"✅ Results saved to {dump_file}")
+    df = append_lemmas(df, results)
+    df.to_feather(dump_file)
+    print(f"✅ Parallel ensemble results saved to {dump_file}")

@@ -63,6 +63,13 @@ def calculate_accuracy(df, label, is_multichoice, birdirect=True, use_generation
     
     by_probs is only for multi-choice tasks and has higher priority than use_generation
     """
+    def fix(x):
+        if len(x) >= 5 and all(isinstance(t, str) for t in x[:5]):
+            if x[:5].tolist() == ["#", "#", "#", "answer", ":"]:
+                return x[5:]
+        return x
+    df["generation_lemmas"] = df["generation_lemmas"].apply(fix)
+    
     if not by_probs:
         answers = [[answer.tolist() for answer in answers.tolist()] for answers in df["answer_lemmas"]]
         try:

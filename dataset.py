@@ -130,10 +130,6 @@ class ParaPharaseDataset:
         self.ds = self.load_dataset()
 
     @property
-    def dataset_root(self):
-        pass
-
-    @property
     def dataset_path(self):
         pass
 
@@ -165,7 +161,6 @@ class ParaPharaseDataset:
     def get_few_shot_examples(self, k=5, seed=42):
         pass
 
-    
     def format_example(self, example):
         question = example["question"]
         answer = example["answers"][0]
@@ -175,6 +170,11 @@ class ParaPharaseDataset:
         if instruction is None:
             instruction = self.instruction
         prompts = [f"{instruction}\n\n{few_shot_examples}\n\nQ: {question}\nA:" for question in questions]
+        return prompts
+
+    def construct_prompts_for_reasoning(self, few_shot_examples, questions):
+        assert few_shot_examples == "", f"Few-shot examples are not supported for reasoning generation. but got {few_shot_examples}."
+        prompts = questions
         return prompts
 
     def construct_prompts_with_paraphrases(self, few_shot_examples, paraphrases):
@@ -214,11 +214,8 @@ class WebQADataset(ParaPharaseDataset):
         self.model_name = model_name
         self.device = device
         self.train_ds = None
+        self.dataset_root = os.path.join(DATASET_ROOT, "webqa", self.model_name)
         super().__init__("webqa", model_name)
-
-    @property
-    def dataset_root(self):
-        return os.path.join(DATASET_ROOT, "webqa", self.model_name)
 
     @property
     def dataset_path(self):
@@ -296,21 +293,10 @@ class MyriadLamaDataset(ParaPharaseDataset):
     def __init__(self, model_name, debug=False, paraphrase_file: str = None):
         self.model_name = model_name
         self.debug = debug
-        if self.debug:
-            print("Debug mode: using a smaller subset of the dataset.")
-            super().__init__("myriadlama-debug", model_name, paraphrase_file)
-        else:
-            super().__init__("myriadlama", model_name, paraphrase_file)
-
-    @property
-    def dataset_root(self):
-        if self.debug:
-            return os.path.join(
-                PROJECT_DATASET_ROOT, "myriadlama-debug", self.model_name
-            )
-        else:
-            return os.path.join(PROJECT_DATASET_ROOT, "myriadlama", self.model_name)
-
+        dataset_name = "myriadlama-debug" if self.debug else "myriadlama"
+        super().__init__(dataset_name, model_name, paraphrase_file)
+        self.dataset_name = os.path.join(PROJECT_DATASET_ROOT, dataset_name, self.model_name)
+    
     @property
     def dataset_path(self):
         return os.path.join(self.dataset_root, "paraphrases_dataset")
@@ -414,16 +400,9 @@ class MyriadLamaDataset(ParaPharaseDataset):
 class MyriadLama100Dataset(MyriadLamaDataset):
     def __init__(self, model_name, debug=False, paraphrase_file: str = None):
         super().__init__(model_name, debug, paraphrase_file)
+        dataset_name = "myriadlama100-debug" if self.debug else "myriadlama100"
+        self.dataset_root = os.path.join(PROJECT_DATASET_ROOT, dataset_name, self.model_name)
     
-    @property
-    def dataset_root(self):
-        if self.debug:
-            return os.path.join(
-                PROJECT_DATASET_ROOT, "myriadlama100-debug", self.model_name
-            )
-        else:
-            return os.path.join(PROJECT_DATASET_ROOT, "myriadlama100", self.model_name)
-
     def collate_fn(self, batch):
         uuids = [item["uuid"] for item in batch]
         answers = [item["answers"] for item in batch]
@@ -460,17 +439,10 @@ class MultiChoiceParaphraseDataset(ParaPharaseDataset):
         self.raw_dataset_path = raw_path
         self.dataset_type = dataset_type
         self.debug = debug
-        if self.debug:
-            super().__init__(f"{dataset_type}", model_name, paraphrase_file)
-        else:
-            super().__init__(f"{dataset_type}-debug", model_name, paraphrase_file)
-
-    @property
-    def dataset_root(self):
-        if self.debug:
-            return os.path.join(PROJECT_DATASET_ROOT, f"{self.dataset_type}-debug", self.model_name)
-        return os.path.join(PROJECT_DATASET_ROOT, f"{self.dataset_type}", self.model_name)
-
+        dataset_name = f"{dataset_type}-debug" if self.debug else f"{dataset_type}"
+        self.dataset_root = os.path.join(PROJECT_DATASET_ROOT, dataset_name, self.model_name)
+        super().__init__(f"{dataset_type}", model_name, paraphrase_file)
+        
     @property
     def dataset_path(self):
         return os.path.join(self.dataset_root, "paraphrases_dataset")
@@ -686,29 +658,43 @@ class LogiQAParaphraseDataset(MultiChoiceParaphraseDataset):
 class HotpotDataset(ParaPharaseDataset):
     """HotpotQA paraphrase dataset: 1 manual + 10 auto paraphrases per uuid."""
 
-    def __init__(self, model_name, debug=False, paraphrase_file: str = None):
+    def __init__(
+            self, 
+            model_name, 
+            debug=False, 
+            reasoning=False,
+            num_paraphrases: int = None,
+            paraphrase_file: str = None
+        ):
+
         self.model_name = model_name
         self.debug = debug
+        self.reasoning = reasoning
+        self.num_paraphrases = 4 if num_paraphrases is None else num_paraphrases
+        suffix = "-reasoning" if self.reasoning else ""
         if self.debug:
-            print("Debug mode: using a smaller subset of the dataset.")
-            super().__init__("hotpot-debug", model_name, paraphrase_file)
+            suffix += "-debug"
+        
+        self.dataset_name = "hotpot" + suffix
+        self.dataset_root = os.path.join(PROJECT_DATASET_ROOT, self.dataset_name, self.model_name)
+        print(f"Initializing HotpotQA Paraphrase Dataset: reasoning={self.reasoning}, debug={self.debug}, dataset_name={self.dataset_name}")
+        super().__init__(self.dataset_name, model_name, paraphrase_file)
+        
+        if reasoning:
+            self._instruction = \
+                "Think through the given question, then output only the final answer.\n" + \
+                "Output format (strict): ### Answer: <final answer>\n" + \
+                "Do not include any explanation, reasoning, citations, or extra text—only the single answer line."
         else:
-            super().__init__("hotpot", model_name, paraphrase_file)
-
-    @property
-    def dataset_root(self):
-        if self.debug:
-            return os.path.join(PROJECT_DATASET_ROOT, "hotpot-debug", self.model_name)
-        else:
-            return os.path.join(PROJECT_DATASET_ROOT, "hotpot", self.model_name)
-
+            self._instruction = "Answer the question based on the provided context in one or two sentences."
+        
     @property
     def dataset_path(self):
         return os.path.join(self.dataset_root, "paraphrases_dataset")
 
     @property
     def instruction(self):
-        return "Answer the question based on the provided context in one or two sentences."
+        return self._instruction
 
     def load_dataset(self):
         if os.path.exists(self.dataset_path):
@@ -748,7 +734,7 @@ class HotpotDataset(ParaPharaseDataset):
             
             # Parse auto_paraphrases - handle both list and string representations
             assert isinstance(item['auto_paraphrases'], list), f"Expected list for auto_paraphrases, got {type(item['auto_paraphrases'])}"
-            auto_paraphrases = item['auto_paraphrases'][:4]
+            auto_paraphrases = item['auto_paraphrases']
             items.append({
                 "uuid": uuid,
                 "answers": answers,
@@ -785,12 +771,14 @@ class HotpotDataset(ParaPharaseDataset):
                 assert uuid in self.additional_paraphrases, f"⚠️ Hotpot uuid {uuid} not found in additional paraphrases file"
                 _paraphrases = [self.additional_paraphrases[uuid]["seed_prompt"]] + self.additional_paraphrases[uuid]["auto_paraphrases"]
                 _is_origs = [True] + [False] * len(self.additional_paraphrases[uuid]["auto_paraphrases"])
+                _paraphrases = _paraphrases[: self.num_paraphrases + 1]
+                _is_origs = _is_origs[: self.num_paraphrases + 1]
             else:
                 manual_list = item["manual_paraphrases"]
-                auto_list = item["auto_paraphrases"]
+                auto_list = item["auto_paraphrases"][:self.num_paraphrases]
                 _paraphrases = manual_list + auto_list
-                _is_origs = [True] + [False] * 4
-                assert len(_paraphrases) == 5, f"⚠️ Hotpot uuid {uuid}: total paraphrases {len(_paraphrases)} != 5"
+                _is_origs = [True] + [False] * self.num_paraphrases
+                assert len(_paraphrases) == 1 + self.num_paraphrases, f"⚠️ Hotpot uuid {uuid}: total paraphrases {len(_paraphrases)} != {1 + self.num_paraphrases}"
             paraphrases.append(_paraphrases)
             is_origs.append(_is_origs)
         return uuids, answers, list(zip(*paraphrases)), list(zip(*is_origs))
@@ -798,7 +786,9 @@ class HotpotDataset(ParaPharaseDataset):
     def get_few_shot_examples(self, k=5, seed=42):
         if not os.path.exists(self.dataset_path):
             raise FileNotFoundError(f"Dataset not found at {self.dataset_path}. Please run the dataset preparation first.")
-
+        if k == 0:
+            return "" 
+        
         full_ds = load_from_disk(self.dataset_path)
         random.seed(seed)
         indices = random.sample(range(len(full_ds)), k)
@@ -809,26 +799,54 @@ class HotpotDataset(ParaPharaseDataset):
         answer = example["answers"][0] if isinstance(example["answers"], list) else example["answers"]
         return f"Q: {question}\nA: {answer}"
     
-def get_dataset_instance(dataset_name, model_name, debug=False, additional_paraphrases_file=None):
+def get_dataset_instance(
+        dataset_name, model_name, 
+        debug=False, reasoning=False,
+        num_paraphrases=None,
+        additional_paraphrases_file=None):
     if dataset_name == "webqa":
         from dataset import WebQADataset
         dataset = WebQADataset(model_name=model_name)
     elif dataset_name == "myriadlama":
         from dataset import MyriadLamaDataset
-        dataset = MyriadLamaDataset(model_name=model_name, debug=debug, paraphrase_file=additional_paraphrases_file)
+        dataset = MyriadLamaDataset(
+            model_name=model_name, 
+            debug=debug, 
+            num_paraphrases=num_paraphrases,
+            paraphrase_file=additional_paraphrases_file)
     elif dataset_name == "commonsense":
         from dataset import CommonsenseParaphraseDataset
-        dataset = CommonsenseParaphraseDataset(model_name=model_name, debug=debug, paraphrase_file=additional_paraphrases_file)
+        dataset = CommonsenseParaphraseDataset(
+            model_name=model_name, 
+            debug=debug, 
+            num_paraphrases=num_paraphrases,
+            paraphrase_file=additional_paraphrases_file)
     elif dataset_name == "mmlu":
         from dataset import MMLUParaphraseDataset
-        dataset = MMLUParaphraseDataset(model_name=model_name, debug=debug, paraphrase_file=additional_paraphrases_file)
+        dataset = MMLUParaphraseDataset(
+            model_name=model_name, 
+            debug=debug, 
+            num_paraphrases=num_paraphrases,
+            paraphrase_file=additional_paraphrases_file)
     elif dataset_name == "logiqa":
         from dataset import LogiQAParaphraseDataset
-        dataset = LogiQAParaphraseDataset(model_name=model_name, debug=debug, paraphrase_file=additional_paraphrases_file)
+        dataset = LogiQAParaphraseDataset(
+            model_name=model_name, 
+            debug=debug, 
+            num_paraphrases=num_paraphrases,
+            paraphrase_file=additional_paraphrases_file)
     elif dataset_name == "hotpot":
         from dataset import HotpotDataset
-        dataset = HotpotDataset(model_name=model_name, debug=debug, paraphrase_file=additional_paraphrases_file)
+        dataset = HotpotDataset(
+            model_name=model_name, 
+            debug=debug, 
+            reasoning=reasoning,
+            num_paraphrases=num_paraphrases,
+            paraphrase_file=additional_paraphrases_file)
     else:
-        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', or 'logiqa'.")
+        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', 'logiqa', or 'hotpot'.")
+    
+    if model_name.startswith("phi3") and dataset.is_multi_choice:
+        dataset.choice_labels = [label.strip() for label in dataset.choice_labels]
     
     return dataset

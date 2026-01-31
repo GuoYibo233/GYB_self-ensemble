@@ -9,7 +9,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 from tqdm import tqdm
 
-from utils import dump_jsonl, load_jsonl
+from utils import dump_jsonl, load_jsonl, reasoning_generation
 
 
 def extract_json(text: str) -> Optional[Dict]:
@@ -190,9 +190,15 @@ def enforced_paraphrase(
                 {"role": "system", "content": system_rules + "\n" + contract},
                 {"role": "user", "content": user_msg},
             ]
-            return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+            return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=True)
         return system_rules + "\n" + contract + "\nUSER:\n" + user_msg + "\nASSISTANT:\n"
 
+    reasoning_generation(
+        model, tokenizer,
+        instruction, prompt, 
+        temperature, top_p, 
+        max_new_tokens=512
+    )
     collected_paraphrases = []
     seen_texts = set()
     

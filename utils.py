@@ -3,12 +3,17 @@ import os
 import random
 import re
 import string
+from pdb import set_trace
 
 import numpy as np
 import pandas as pd
 import spacy
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from constants import MODEL_PATHs
 
 # Dynamic path configuration based on current user
 _current_user = os.environ.get('USER', 'unknown')
@@ -34,29 +39,23 @@ def lemmaize_predicts(predict):
     return [token.lemma_.lower() for token in doc]
 
 def lemmaize_chunk(chunk):
-    predict_lemmas = []
     generation_lemmas = []
     answer_lemmas = []
 
     for idx, row in chunk.iterrows():
-        prediction = row["prediction"]
         generation = row["generation"]
         answers = row["answers"]
         generation = str(generation).strip().split(".")[0] if "." in str(generation) else str(generation)
-        predict_lemmas.append(lemmaize_predicts(prediction))
         answer_lemmas.append([lemmaize_predicts(ans) for ans in answers])
         generation_lemmas.append(lemmaize_predicts(generation))
-    return predict_lemmas, generation_lemmas, answer_lemmas
+    return generation_lemmas, answer_lemmas
 
 def append_lemmas(df, results):
-    all_predict_lemmas = []
     all_generation_lemmas = []
     all_answer_lemmas = []
-    for predict_lemmas, generation_lemmas, answer_lemmas in results:
-        all_predict_lemmas.extend(predict_lemmas)
+    for generation_lemmas, answer_lemmas in results:
         all_generation_lemmas.extend(generation_lemmas)
         all_answer_lemmas.extend(answer_lemmas)
-    df["predict_lemma"] = pd.Series(all_predict_lemmas, dtype=object)
     df["generation_lemmas"] = pd.Series(all_generation_lemmas, dtype=object)
     df["answer_lemmas"] = pd.Series(all_answer_lemmas, dtype=object)
     return df
@@ -205,7 +204,7 @@ def multinormal_generation(model, tokenizer, prompts, num_samples):
     split_generated_texts = [generated_texts[i:i+100] for i in range(0, len(generated_texts), 100)]
     return split_generated_texts
 
-def greedy_generation(model, tokenizer, prompts):
+def greedy_generation(model, tokenizer, prompts, stop_at_newline=True):
     model.generation_config.temperature = None
     model.generation_config.top_p = None
     model.generation_config.top_k = None
@@ -232,13 +231,62 @@ def greedy_generation(model, tokenizer, prompts):
     generated_token_ids = outputs[:, inputs.input_ids.shape[1]:]
     generated_texts = tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)
     # Stop at newline to get only the first line
-    generated_texts = [text.split('\n')[0].strip() for text in generated_texts]
+    if stop_at_newline:
+        generated_texts = [text.split('\n')[0].strip() for text in generated_texts]
     # new_generated_texts = [gen[len(prompt):] for gen, prompt in zip(generated_texts, [prompt for prompt in prompts for _ in range(100)])]
     return generated_texts
 
+def reasoning_generation(model, tokenizer, instruction, prompts, temperature, top_p, max_new_tokens):
+    assert "Qwen3ForCausalLM" in model.config.architectures, "Reasoning generation is only supported for Qwen models."
+    model.generation_config.temperature = temperature
+    model.generation_config.top_p = top_p
+    model.generation_config.pad_token_id = tokenizer.eos_token_id
 
-import torch.nn.functional as F
+    messages = []
+    for prompt in prompts:
+        messages.append([
+            {
+                "role": "system",
+                "content": instruction,
+            },
+            {
+                "role": "user", 
+                "content": prompt
+            }
+        ])
+    
+    messages = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=True
+    )
+    model_inputs = tokenizer(
+        messages, 
+        truncation=True, 
+        padding=True, 
+        padding_side='left',
+        return_tensors="pt").to(model.device)
+    
+    all_generated_ids = model.generate(
+        **model_inputs,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        max_new_tokens=max_new_tokens,
+    )
+    thinkings, answers = [], []
+    for generated_ids in all_generated_ids:
+        output_ids = generated_ids[len(model_inputs.input_ids[0]):].tolist() 
+        try:
+            index = len(output_ids) - output_ids[::-1].index(151668)
+        except ValueError:
+            index = 0
 
+        thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip("\n")
+        answer = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
+        thinkings.append(thinking_content)
+        answers.append(answer)
+    return messages, thinkings, answers
 
 def prompt_ppl(model, tokenizer, q_len, prompts):
     tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -277,8 +325,6 @@ def prompt_ppl(model, tokenizer, q_len, prompts):
     ppl = torch.exp(avg_nll)
     return ppl
 
-
-
 def normalize_answer(s):
     """Lower text and remove punctuation, articles, and extra whitespace."""
     def remove_articles(text):
@@ -311,6 +357,12 @@ def take_until_punct_or_space(tokens: list[str]) -> list[str]:
             break
         result.append(tok)
     return result
+
+
+def create_batches(iterable, batch_size):
+    """Yield successive batches from iterable."""
+    for i in range(0, len(iterable), batch_size):
+        yield iterable[i:i + batch_size]
 
 
 def partial_match_scores(predictions, gold_answers, birdirect=False):
@@ -453,3 +505,36 @@ def dump_json(obj, filename, pretty=False):
         else:
             json.dump(obj, fp, ensure_ascii=False)
 
+
+def get_baseline_dumpfile(dataset, args):
+    if args.method == "origin":
+        dump_file = f"{dataset.dataset_root}/baseline_origin"
+    elif args.method == "per_prompt":
+        dump_file = f"{dataset.dataset_root}/baseline_per_prompt"
+    elif args.method == "ppl":
+        dump_file = f"{dataset.dataset_root}/baseline_ppl"
+    else:  # args.method == "all"
+        raise NotImplementedError("Method 'all' is not implemented in this script.")    
+
+    dump_file += f".{args.num_fewshots}shots"
+    dump_file += f".{args.num_paraphrases}paras"
+    dump_file += f".temp{args.temperature}"
+    dump_file += f".topp{args.top_p}"
+    dump_file += f".maxnew{args.max_new_tokens}"
+    dump_file += f".repeat{args.repeat}"
+    if args.additional_paraphrases_file:
+        dump_file += f".selfparas"
+    dump_file += ".feather"
+
+    return dump_file
+
+def load_model_tokenizer(model_name):
+    if model_name not in MODEL_PATHs:
+        raise ValueError(f"Model {model_name} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
+    model_path = MODEL_PATHs.get(model_name, model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto")
+    return model, tokenizer
+    

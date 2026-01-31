@@ -29,7 +29,15 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from constants import MODEL_PATHs
 from dataset import get_dataset_instance
-from utils import append_lemmas, init_spacy, lemmaize_chunk, single_generation
+from utils import (
+    append_lemmas,
+    create_batches,
+    get_baseline_dumpfile,
+    init_spacy,
+    lemmaize_chunk,
+    reasoning_generation,
+    single_generation,
+)
 
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
 
@@ -47,7 +55,7 @@ def generate_baseline_origin(dataset, dataloader, args):
     Output: datasets/{dataset}/{model}/baseline_origin.feather
     """
     df = pd.DataFrame(
-        columns=["uuid", "answers", "question", "prompt", "prediction", "generation"]
+        columns=["uuid", "answers", "question", "prompt", "generation"]
     )
     few_shot_context = dataset.get_few_shot_examples()
     
@@ -72,11 +80,6 @@ def generate_baseline_origin(dataset, dataloader, args):
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
     return df
 
-def create_batches(iterable, batch_size):
-    """Yield successive batches from iterable."""
-    for i in range(0, len(iterable), batch_size):
-        yield iterable[i:i + batch_size]
-
 def generate_baseline_per_prompt(dataset, dataloader, args):
     """
     Baseline 2: Generate with each paraphrase separately.
@@ -87,12 +90,14 @@ def generate_baseline_per_prompt(dataset, dataloader, args):
     Output: datasets/{dataset}/{model}/baseline_per_prompt.feather
     """
     df = pd.DataFrame(
-        columns=["uuid", "answers", "paraphrase", "prompt", "prediction", "generation"]
+        columns=["uuid", "answers", "paraphrase", "prompt", "generation"]
     )
 
-    max_new_tokens = 10 if args.num_fewshots > 0 else 20
     few_shot_context = dataset.get_few_shot_examples(k=args.num_fewshots)
 
+    assert not (dataset.is_multi_choice and args.temperature > 0), \
+        "Sampling not supported for multi-choice tasks in baseline generation."
+    
     if not dataset.is_multi_choice:
         all_uuids, all_answers, all_paraphrases, all_is_origs = [], [], [], []
         for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
@@ -100,10 +105,11 @@ def generate_baseline_per_prompt(dataset, dataloader, args):
             assert len(_uuids) == 1, "Batch size must be 1 for baseline per_prompt generation."
             assert len(_all_paraphrases) == len(_is_origs), "Mismatch in paraphrases and is_orig lengths."
             for paraphrase, is_orig in zip(_all_paraphrases, _is_origs):
-                all_uuids.append(_uuids[0])
-                all_answers.append(_answers[0])
-                all_paraphrases.append(paraphrase[0])
-                all_is_origs.append(is_orig[0])
+                all_uuids.extend([_uuids[0]] * args.repeat)
+                all_answers.extend([_answers[0]] * args.repeat)
+                all_paraphrases.extend([paraphrase[0]] * args.repeat)
+                all_is_origs.extend([is_orig[0]] * args.repeat)
+
         batch_iterator = create_batches(list(zip(all_uuids, all_answers, all_paraphrases, all_is_origs)), batch_size=args.batch_size)
     else:
         all_uuids, all_answers, all_paraphrases, all_choices_labels, all_choices_texts, all_answer_labels, all_is_origs = [], [], [], [], [], [], []
@@ -115,22 +121,21 @@ def generate_baseline_per_prompt(dataset, dataloader, args):
             choices_texts = _choices_texts[0]
             answer_labels = _answer_labels[0]
             for paraphrase, is_orig in zip(_all_paraphrases, _is_origs):
-                all_uuids.append(_uuids[0])
-                all_answers.append(_answers[0])
-                all_paraphrases.append(paraphrase[0])
-                all_is_origs.append(is_orig[0])
-                all_choices_labels.append(choices_labels)
-                all_choices_texts.append(choices_texts)
-                all_answer_labels.append(answer_labels)
-                # print(paraphrase[0], choices_texts, answer_labels)
-                # set_trace()
+                all_uuids.extend([_uuids[0]] * args.repeat)
+                all_answers.extend([_answers[0]] * args.repeat)
+                all_paraphrases.extend([paraphrase[0]] * args.repeat)
+                all_is_origs.extend([is_orig[0]] * args.repeat)
+                all_choices_labels.extend([choices_labels] * args.repeat)
+                all_choices_texts.extend([choices_texts] * args.repeat)
+                all_answer_labels.extend([answer_labels] * args.repeat)
+        
         batch_iterator = create_batches(
             list(zip(
                 all_uuids, all_answers, all_paraphrases, 
                 all_choices_labels, all_choices_texts, 
                 all_answer_labels, all_is_origs)), 
             batch_size=args.batch_size)
-    
+
     for batch in tqdm(batch_iterator, desc="Generating baseline (per_prompt)", dynamic_ncols=True, total=len(all_uuids)//args.batch_size + 1):
         if dataset.is_multi_choice:
             (uuids, answers, paraphrases, 
@@ -144,25 +149,41 @@ def generate_baseline_per_prompt(dataset, dataloader, args):
             for paraphrase, _choice_labels, _choice_texts in zip(paraphrases, choices_labels, choices_texts):
                 prompt = dataset.construct_multi_choice_prompts(few_shot_context, [paraphrase], _choice_labels, _choice_texts)
                 prompts.append(prompt[0])
-        else:
+        elif not dataset.reasoning:
             prompts = dataset.construct_prompts(few_shot_context, paraphrases)
+        else:
+            prompts = dataset.construct_prompts_for_reasoning(few_shot_context, paraphrases)
         
-        generations, label_probs = single_generation(model, tokenizer, prompts, choice_labels=dataset.choice_labels, max_new_tokens=max_new_tokens)
-        generations = [gen.strip().split("\n")[0] for gen in generations]
-        predictions = [gen.strip().split("\n")[0] for gen in generations]
-        label_strs, label_probs_ = zip(*label_probs) if label_probs is not None else ([], [])
-        label_probs_ = list(zip(*label_probs_))
+        if args.temperature == 0:
+            generations, label_probs = single_generation(
+                model, tokenizer, prompts, 
+                choice_labels=dataset.choice_labels, 
+                max_new_tokens=args.max_new_tokens)
         
+            generations = [gen.strip().split("\n")[0] for gen in generations]
+            label_strs, label_probs_ = zip(*label_probs) if label_probs is not None else ([], [])
+            label_probs_ = list(zip(*label_probs_))
+        else:
+            messages, thinkings, generations = reasoning_generation(
+                model, tokenizer, 
+                dataset.instruction, prompts, 
+                temperature=args.temperature, 
+                top_p=args.top_p, 
+                max_new_tokens=args.max_new_tokens
+            )
+
         items = {
             "uuid": uuids,
             "answers": answers,
             "paraphrase": paraphrases,
             "is_orig": is_origs,
             "prompt": prompts,
-            "prediction": predictions,
             "generation": generations,
+            "thinking": thinkings if dataset.reasoning else None,
+            "messages": messages if dataset.reasoning else None,
         }
 
+        # set_trace()
         if dataset.is_multi_choice:
             items.update({
                 "choices_label": choices_labels,
@@ -205,9 +226,14 @@ if __name__ == "__main__":
     parser.add_argument("--num_fewshots", type=int, default=5, help="Number of few-shot examples to use in prompts (default: 5)")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for processing (default: 5)")
     parser.add_argument("--additional_paraphrases_file", type=str, default=None, help="Path to additional paraphrases file (for datasets that support it)")
+    parser.add_argument("--num_paraphrases", type=int, default=4, help="Number of paraphrases to use (default: 4, only for datasets that support paraphrases)")
     parser.add_argument("--rewrite", action="store_true", help="Regenerate baseline even if file already exists",)
+    parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature (default: 0.0 for greedy generation)",)
+    parser.add_argument("--top_p", type=float, default=0.95, help="Top-p sampling value (default: 0.95)",)
+    parser.add_argument("--max_new_tokens", type=int, default=10, help="Maximum number of new tokens to generate (default: 1024)",)
+    parser.add_argument("--repeat", type=int, default=1, help="Number of times to repeat generation for each input (default: 1)",)
     parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose output",)
-
+    parser.add_argument("--reasoning", action="store_true", help="Enable reasoning mode for datasets that support it (e.g., HotpotQA)",)
     args = parser.parse_args()
 
     # Load dataset
@@ -215,6 +241,8 @@ if __name__ == "__main__":
         dataset_name=args.dataset,
         model_name=args.model,
         debug=args.debug,
+        reasoning=args.reasoning,
+        num_paraphrases=args.num_paraphrases,
         additional_paraphrases_file=args.additional_paraphrases_file,
     )
     dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
@@ -225,17 +253,8 @@ if __name__ == "__main__":
     if args.model not in MODEL_PATHs:
         raise ValueError(f"Model {args.model} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
     model_path = MODEL_PATHs.get(args.model, args.model)
-
+    dump_file = get_baseline_dumpfile(dataset, args)
     print("Baseline Generation for Self-Ensemble Experiments")    
-    
-    if args.method == "origin":
-        dump_file = f"{dataset.dataset_root}/baseline_origin.{args.num_fewshots}shots.feather"
-    elif args.method == "per_prompt":
-        dump_file = f"{dataset.dataset_root}/baseline_per_prompt.{args.num_fewshots}shots.feather"
-    elif args.method == "ppl":
-        dump_file = f"{dataset.dataset_root}/baseline_ppl.{args.num_fewshots}shots.feather"
-    else:  # args.method == "all"
-        raise NotImplementedError("Method 'all' is not implemented in this script.")    
 
     if os.path.exists(dump_file) and not args.rewrite:
         print(f"✅ File {dump_file} already exists, skipping generation. Use --rewrite to regenerate.")
@@ -250,7 +269,7 @@ if __name__ == "__main__":
         df = generate_baseline_origin(dataset, dataloader, args)
     elif args.method == "per_prompt":
         df = generate_baseline_per_prompt(dataset, dataloader, args)
-    
+        
     # Lemmaize predictions and answers
     chunks = np.array_split(df, num_parts)
     with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
