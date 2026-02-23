@@ -222,6 +222,7 @@ def create_myriadlama_score_mod(
 
     return score_mod
 
+
 class FlexAttentionWrapper:
     """
     Wrapper that patches model attention layers to use FlexAttention.
@@ -235,6 +236,155 @@ class FlexAttentionWrapper:
         self.current_mask_mod = None
         self.current_score_mod = None
 
+    def create_patched_forward_for_llama(
+        self,
+        layer_idx, 
+        original_attn,
+        hidden_states,
+        position_embeddings,
+        attention_mask=None,
+        past_key_values=None,
+        cache_position=None,
+        **kwargs,
+    ):
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, original_attn.head_dim)
+
+        # Llama3: no q_norm / k_norm here (unlike Qwen3)
+        query_states = original_attn.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = original_attn.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = original_attn.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if past_key_values is not None:
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_values.update(key_states, value_states, layer_idx, cache_kwargs)
+
+        # ↑ Identical to original up to here
+        # ↓ Replace attention_interface with flex_attention
+
+        bsz = hidden_states.shape[0]
+        num_heads = query_states.shape[1]
+        q_len = query_states.shape[2]
+        kv_len = key_states.shape[2]
+
+        # GQA expansion
+        num_key_value_heads = key_states.shape[1]
+        if num_key_value_heads != num_heads:
+            key_states = key_states.repeat_interleave(num_heads // num_key_value_heads, dim=1)
+            value_states = value_states.repeat_interleave(num_heads // num_key_value_heads, dim=1)
+
+        if self.current_mask_mod is not None and q_len > 1:
+            block_mask = create_block_mask(
+                self.current_mask_mod,
+                B=bsz,
+                H=num_heads,
+                Q_LEN=q_len,
+                KV_LEN=kv_len,
+                device=query_states.device,
+            )
+        else:
+            block_mask = None
+
+        # Llama3: no explicit self.scaling attribute, use default (None = 1/sqrt(head_dim))
+        scale = getattr(original_attn, "scaling", None)
+        attn_output = flex_attention(
+            query_states,
+            key_states,
+            value_states,
+            block_mask=block_mask,
+            score_mod=self.current_score_mod,
+            scale=scale,
+        )
+
+        # ↓ Identical to original from here
+        attn_output = attn_output.transpose(1, 2).reshape(*input_shape, -1).contiguous()
+        attn_output = original_attn.o_proj(attn_output)
+        return attn_output, None
+
+    def create_patched_forward_for_qwen3(
+        self,
+        layer_idx, 
+        original_attn,        
+        hidden_states,
+        position_embeddings,
+        attention_mask=None,
+        past_key_values=None,
+        cache_position=None,
+        **kwargs,
+    ):
+        bsz, q_len, _ = hidden_states.size()
+        if (self.current_mask_mod is None and self.current_score_mod is None):
+            return self.original_forwards[layer_idx](
+                hidden_states,
+                position_embeddings,
+                attention_mask,
+                past_key_values,
+                cache_position,
+                **kwargs,
+            )
+        
+        # Qwen3-specific attention logic in original code: 
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3/modeling_qwen3.py
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, original_attn.head_dim)
+
+        query_states = original_attn.q_norm(original_attn.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        key_states = original_attn.k_norm(original_attn.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        value_states = original_attn.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+        if past_key_values is not None:
+            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_values.update(key_states, value_states, original_attn.layer_idx, cache_kwargs)
+        
+        # ↑ Everything above is unchanged
+        # ↓ Replace attention_interface with flex_attention
+
+        bsz = hidden_states.shape[0]
+        q_len = query_states.shape[2]   # after KV cache update, Q len may differ from KV len
+        kv_len = key_states.shape[2]
+        num_heads = query_states.shape[1]
+        
+        # GQA expansion — flex_attention requires Q and KV head counts to match
+        num_key_value_heads = key_states.shape[1]
+        if num_key_value_heads != num_heads:
+            key_states = key_states.repeat_interleave(num_heads // num_key_value_heads, dim=1)
+            value_states = value_states.repeat_interleave(num_heads // num_key_value_heads, dim=1)
+
+        if self.current_mask_mod is not None and q_len > 1:
+            block_mask = create_block_mask(
+                self.current_mask_mod,
+                B=bsz,
+                H=num_heads,
+                Q_LEN=q_len,
+                KV_LEN=kv_len,
+                device=query_states.device,
+            )
+        else:
+            block_mask = None
+        
+        # scale=self.scaling keeps Qwen3's explicit head_dim scaling instead of the default 1/sqrt(head_dim)
+        attn_output = flex_attention(
+            query_states,
+            key_states,
+            value_states,
+            block_mask=block_mask,
+            score_mod=self.current_score_mod,
+            scale=original_attn.scaling,
+        )
+        
+        # ↑ flex_attention returns (bsz, num_heads, q_len, head_dim), no attn_weights
+        # ↓ Everything below is unchanged except attn_weights is None
+        attn_output = attn_output.transpose(1, 2).reshape(*input_shape, -1).contiguous()
+        attn_output = original_attn.o_proj(attn_output)
+        return attn_output, None  # flex_attention doesn't return weights
+
     def create_patched_forward(self, layer_idx, original_attn):
         """Create a patched forward function for an attention layer."""
 
@@ -242,90 +392,35 @@ class FlexAttentionWrapper:
             hidden_states,
             position_embeddings,
             attention_mask=None,
-            past_key_value=None,
+            past_key_values=None,
             cache_position=None,
             **kwargs,
         ):
-            # If no custom mask or sequence is too short, use original
-            bsz, q_len, _ = hidden_states.size()
-            if (self.current_mask_mod is None and self.current_score_mod is None) or q_len == 1:
-                return self.original_forwards[layer_idx](
-                    hidden_states,
-                    position_embeddings,
-                    attention_mask,
-                    past_key_value,
-                    cache_position,
-                    **kwargs,
+            # set_trace()
+            if self.model.config.model_type.startswith("llama"):
+                return self.create_patched_forward_for_llama(
+                    layer_idx, 
+                    original_attn, 
+                    hidden_states, 
+                    position_embeddings, 
+                    attention_mask, 
+                    past_key_values, 
+                    cache_position, 
+                    **kwargs
                 )
-
-            # Extract position embeddings
-            cos, sin = position_embeddings
-
-            # Compute Q, K, V projections
-            query_states = original_attn.q_proj(hidden_states)
-            key_states = original_attn.k_proj(hidden_states)
-            value_states = original_attn.v_proj(hidden_states)
-
-            # Reshape to multi-head format
-            num_heads = original_attn.config.num_attention_heads
-            num_key_value_heads = original_attn.config.num_key_value_heads
-            head_dim = original_attn.head_dim
-
-            query_states = query_states.view(bsz, q_len, num_heads, head_dim).transpose(
-                1, 2
-            )
-            key_states = key_states.view(
-                bsz, q_len, num_key_value_heads, head_dim
-            ).transpose(1, 2)
-            value_states = value_states.view(
-                bsz, q_len, num_key_value_heads, head_dim
-            ).transpose(1, 2)
-
-            # Apply rotary position embeddings
-            query_states, key_states = apply_rotary_pos_emb(
-                query_states, key_states, cos, sin
-            )
-
-            # Expand key and value states for GQA
-            if num_key_value_heads != num_heads:
-                key_states = key_states.repeat_interleave(
-                    num_heads // num_key_value_heads, dim=1
+            elif self.model.config.model_type.startswith("qwen3"):
+                return self.create_patched_forward_for_qwen3(
+                    layer_idx, 
+                    original_attn, 
+                    hidden_states, 
+                    position_embeddings, 
+                    attention_mask, 
+                    past_key_values, 
+                    cache_position, 
+                    **kwargs
                 )
-                value_states = value_states.repeat_interleave(
-                    num_heads // num_key_value_heads, dim=1
-                )
-
-            # Create block mask and use FlexAttention
-            try:
-                if self.current_mask_mod is None:
-                    block_mask = None
-                else:
-                    block_mask = create_block_mask(
-                        self.current_mask_mod,
-                        B=bsz,
-                        H=num_heads,
-                        Q_LEN=q_len,
-                        KV_LEN=q_len,
-                        device=query_states.device,
-                    )
-
-                attn_output = flex_attention(query_states, key_states, value_states, block_mask=block_mask, score_mod=self.current_score_mod)
-            except Exception as e:
-                print(
-                    f"⚠️  FlexAttention failed in layer {layer_idx}: {type(e).__name__}: {e}"
-                )
-                attn_output = torch.nn.functional.scaled_dot_product_attention(
-                    query_states, key_states, value_states, is_causal=True
-                )
-
-            # Reshape output
-            attn_output = attn_output.transpose(1, 2).contiguous()
-            attn_output = attn_output.reshape(bsz, q_len, num_heads * head_dim)
-
-            # Output projection
-            attn_output = original_attn.o_proj(attn_output)
-
-            return attn_output, attn_output
+            else:
+                raise NotImplementedError("FlexAttention patching only implemented for LLaMA-based models currently.")
 
         return patched_forward
 
@@ -358,24 +453,15 @@ class FlexAttentionWrapper:
         self.current_score_mod = None
         self.is_patched = False
 
-
-# ==============================================================================
-# MODIFIED - MyriadLama-specific generation function
-# ==============================================================================
-
-
 @torch.no_grad()
-def myriadlama_flex_generation(prompt, segment_metadata, max_new_tokens=10, modify_rope=False, has_bos=True):
+def flex_generation(prompt, segment_metadata, max_new_tokens=10, modify_rope=False, has_bos=True):
     """
-    Generate text using FlexAttention for MyriadLAMA.
-
-    Modified for MyriadLAMA (NEW FORMAT):
+    Generate text using FlexAttention.
     - Accepts a SINGLE prompt with ALL paraphrases
     - Shorter max_new_tokens (10 instead of 20) for one-word answers
     - All paraphrases are treated equally (all are manually generated)
     - Each paraphrase segment is isolated during encoding
-    - Optimized for fill-in-the-blank task
-
+    
     Args:
         prompt: Single prompt string with ALL paraphrases
         segment_metadata: Metadata dict with segment lengths and types
@@ -571,8 +657,7 @@ if __name__ == "__main__":
     model_path = MODEL_PATHs.get(args.model, args.model)
 
     # Determine file name based on number of paraphrases
-    dump_file = f"{dataset.dataset_root}/myriadlama."
-    dump_file = f"{dataset.dataset_root}/{args.dataset}."
+    dump_file = f"{dataset.dataset_root}/"
     if args.modify_attn:
         dump_file += "modifyattn."
     if args.modify_rope:
@@ -663,7 +748,7 @@ if __name__ == "__main__":
         else:
             if args.single_para_qapair:
                 prompt, segment_metadata = dataset.construct_prompts_single_para_qapair(
-                    few_shot_examples, paraphrases=sampled_paraphrases[0], choices_labels=choices_labels[0], choices_texts=choices_texts[0]
+                    few_shot_examples, paraphrases=sampled_paraphrases[0]
                 )
             else:
                 prompt, segment_metadata = dataset.construct_prompts_with_paraphrases(
@@ -671,13 +756,12 @@ if __name__ == "__main__":
                 )
         
         # Generate using MyriadLAMA-specific FlexAttention
-        generation = myriadlama_flex_generation(
+        generation = flex_generation(
             prompt, segment_metadata, max_new_tokens=max_new_tokens, modify_rope=args.modify_rope, has_bos=has_bos
         )
 
         # Extract prediction (first word only for MyriadLAMA)
         prediction = generation.strip().split()[0] if generation.strip() else ""
-
         batch_predictions.append(prediction)
         batch_generations.append(generation)
         batch_templates.append(sampled_paraphrases)
