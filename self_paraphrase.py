@@ -301,7 +301,7 @@ if __name__ == "__main__":
         
     paraphrase_path = os.path.join(
         dataset.dataset_path, 
-        f"paraphrases.num_para{args.num_paraphrase}.max_rounds{args.max_rounds}.temp{args.temperature}.topp{args.top_p}.jsonl")
+        f"paraphrases.num_para{args.num_paraphrase}.max_rounds{args.max_rounds}.temp{args.temperature}.topp{args.top_p}.{args.paraphrase_flag}.jsonl")
 
     if os.path.exists(paraphrase_path) and not args.rewrite:
         paraphrases = {item["uuid"]: item for item in load_jsonl(paraphrase_path, verbose=True)}

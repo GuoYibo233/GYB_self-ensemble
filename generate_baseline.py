@@ -2,7 +2,6 @@
 import multiprocessing as mp
 import os
 import warnings
-from pdb import set_trace
 
 import numpy as np
 import pandas as pd
@@ -151,6 +150,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa", "hotpot"], help="Dataset: 'webqa' or 'myriadlama'")
     parser.add_argument("--num_fewshots", type=int, default=5, help="Number of few-shot examples to use in prompts (default: 5)")
     parser.add_argument("--additional_paraphrases_file", type=str, default=None, help="Path to additional paraphrases file (for datasets that support it)")
+    parser.add_argument("--paraphrase_flag", type=str, default=None, help="Flag to name the paraphrase set used (e.g., 'paraphrase_v1')")
     parser.add_argument("--rewrite", action="store_true", help="Regenerate baseline even if file already exists",)
     parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose output",)
     parser.add_argument("--version", type=str, default="", help="Version of the dataset to use (if applicable)",)
@@ -169,6 +169,7 @@ if __name__ == "__main__":
         debug=args.debug,
         thinking=args.thinking,
         additional_paraphrases_file=args.additional_paraphrases_file,
+        paraphrase_flag=args.paraphrase_flag,
     )
     dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
 
@@ -199,6 +200,3 @@ if __name__ == "__main__":
     df = append_lemmas(df, results)
     df.to_feather(dump_file)
     print(f"\n✅ Baseline (per_prompt) results saved to: {dump_file}")
-    
-    # output=$(python generate_baseline.py --method per_prompt --model llama3.2_3b_it --dataset myriadlama 2>&1)
-    # dump_file=$(echo "$output" | grep -oP '(?<=Output to: ).*|(?<=results saved to: ).*|(?<=File ).*(?= already exists)' | head -1)

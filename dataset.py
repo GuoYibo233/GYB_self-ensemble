@@ -2,6 +2,8 @@ import hashlib
 import os
 import random
 from abc import abstractmethod
+from pdb import set_trace
+from typing import Iterable
 
 import pandas as pd
 from numpy import isin
@@ -113,10 +115,16 @@ def webqa_collate_fn(batch):
     return questions, answers
 
 class ParaPharaseDataset:
-    def __init__(self, dataset, model, paraphrase_file: str = None):
+    def __init__(
+            self, 
+            dataset, 
+            model, 
+            paraphrase_file: str = None, 
+            paraphrase_flag: str = None):
         self.dataset = dataset
         self.model = model
         
+        self.paraphrase_flag = paraphrase_flag
         self.num_additional_paraphrases = None
         self.additional_paraphrases = None
         paraphrase_file = os.path.join(self.dataset_path, paraphrase_file) if paraphrase_file is not None else None
@@ -168,9 +176,10 @@ class ParaPharaseDataset:
         return f"Q: {question}\nA: {answer}"
 
     def construct_prompts(self, instruction, few_shot_examples, paraphrases, series_ensemble):
+        set_trace()
         assert isinstance(instruction, str), "Instruction must be a string"
         assert isinstance(few_shot_examples, str) or few_shot_examples is None, "Few-shot examples must be a string or None"
-        assert isinstance(paraphrases, list) and all(isinstance(q, str) for q in paraphrases), "Paraphrases must be a list of strings"
+        assert isinstance(paraphrases, Iterable) and all(isinstance(q, str) for q in paraphrases), "Paraphrases must be a list of strings"
         if series_ensemble:
             # These paraphrases will be concatenated into a single prompt for generation, 
             # with few-shot examples included at the beginning of the prompt
@@ -361,13 +370,18 @@ class WebQADataset(ParaPharaseDataset):
         return "\n\n".join(self.format_example(self.train_ds[i]) for i in indices)
 
 class MyriadLamaDataset(ParaPharaseDataset):
-    def __init__(self, model_name, paraphrase_file: str = None, debug=False):
+    def __init__(
+            self, 
+            model_name: str, 
+            debug: bool = False, 
+            paraphrase_file: str = None, 
+            paraphrase_flag: str = None):
         self.model_name = model_name
         self.debug = debug
         self.thinking = False
         self.dataset_name = "myriadlama-debug" if self.debug else "myriadlama"
         self.dataset_root = os.path.join(PROJECT_DATASET_ROOT, self.dataset_name, self.model_name)
-        super().__init__(self.dataset_name, model_name, paraphrase_file)
+        super().__init__(self.dataset_name, model_name, paraphrase_file, paraphrase_flag)
 
     @property
     def dataset_path(self):
@@ -870,7 +884,8 @@ class HotpotDataset(ParaPharaseDataset):
 def get_dataset_instance(
         dataset_name, model_name, 
         debug=False, thinking=False,
-        additional_paraphrases_file=None):
+        additional_paraphrases_file=None, 
+        paraphrase_flag=None):
     if dataset_name == "webqa":
         assert not thinking, "``thinking`` generation is not supported for WebQA dataset."
         from dataset import WebQADataset
@@ -881,7 +896,8 @@ def get_dataset_instance(
         dataset = MyriadLamaDataset(
             model_name=model_name, 
             debug=debug, 
-            paraphrase_file=additional_paraphrases_file)
+            paraphrase_file=additional_paraphrases_file,
+            paraphrase_flag=paraphrase_flag)
     elif dataset_name == "commonsense":
         assert not thinking, "``thinking`` generation is not supported for Commonsense dataset."
         from dataset import CommonsenseParaphraseDataset
