@@ -15,13 +15,17 @@ def get_layers(model: str):
         "qwen2.5_3b": 27,
         "qwen2.5_7b": 21,
         "qwen2.5_14b": 36,
-        "qwen3_4b": 27,
-        "qwen3_30b": 36,
-        "qwen3_235b": 71,
         "pythia_2.8b": 24,
         "phi3.5_mini": 24,
         "bloom_3b": 25,
         "gpt_20b": 18,
+        "qwen3_1.7b": 21,
+        "qwen3_4b": 27,
+        "qwen3_8b": 27,
+        "qwen3_14b": 30,
+        "qwen3_30b": 36,
+        "qwen3_32b": 48,
+        "qwen3_235b": 71,
     }
 
     for key in model2layers:
@@ -157,8 +161,7 @@ def calculate_series_ensemble_accuracy(
         repeat_paras=repeat_paras, num_fewshots=num_fewshots,
         num_paraphrases=num_paraphrases, num_samples=num_samples)
     if os.path.exists(filename) is False:
-        basename = filename.replace(dump_file_prefix, "./")
-        print(f"File {basename} does not exist!")
+        print(f"File {filename} does not exist!")
         return None
     
     try:
@@ -253,8 +256,7 @@ def calculate_parallel_ensemble_accuracy(
         multilayer=multilayer, ensemble_alpha=ensemble_alpha, token_mode=token_mode,
         num_fewshots=num_fewshots, num_paraphrases=num_paraphrases, num_samples=num_samples)
     if os.path.exists(filename) is False:
-        basename = filename.replace(dump_file_prefix, "./")
-        print(f"File {basename} does not exist!")
+        print(f"File {filename} does not exist!")
         return None
     
     try:

@@ -114,7 +114,7 @@ def get_label_prob(tokenizer, logits, choice_labels):
             label_probs.append((label, batch_label_probs))
     return label_probs
 
-def single_generation(model, tokenizer, prompts, choice_labels=None, max_new_tokens=10):
+def single_generation(model, tokenizer, prompts, max_new_tokens, choice_labels=None):
     """Generate responses using greedy decoding."""
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model.generation_config.temperature = None
@@ -170,7 +170,7 @@ def single_generation(model, tokenizer, prompts, choice_labels=None, max_new_tok
     new_generated_texts = [gen.strip() for gen in generated_texts]
     return new_generated_texts, label_probs
 
-def multinormal_generation(model, tokenizer, prompts, num_samples):
+def multinormal_generation(model, tokenizer, prompts, max_new_tokens, num_samples):
     inputs = tokenizer(
         prompts, return_tensors="pt", padding=True, padding_side='left',
         truncation=True, return_token_type_ids=False).to(model.device)
@@ -191,7 +191,7 @@ def multinormal_generation(model, tokenizer, prompts, num_samples):
         return_dict_in_generate=False,
         output_scores=False,
         output_hidden_states=False,
-        max_new_tokens=10, 
+        max_new_tokens=max_new_tokens, 
         eos_token_id=eos_token_id,
         pad_token_id=tokenizer.eos_token_id)
     
@@ -199,12 +199,10 @@ def multinormal_generation(model, tokenizer, prompts, num_samples):
     generated_texts = tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)
     # Stop at newline to get only the first line
     generated_texts = [text.split('\n')[0].strip() for text in generated_texts]
-    # generated_texts = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-    # new_generated_texts = [gen[len(prompt):] for gen, prompt in zip(generated_texts, [prompt for prompt in prompts for _ in range(100)])]
     split_generated_texts = [generated_texts[i:i+100] for i in range(0, len(generated_texts), 100)]
     return split_generated_texts
 
-def greedy_generation(model, tokenizer, prompts, stop_at_newline=True):
+def greedy_generation(model, tokenizer, prompts, max_new_tokens, stop_at_newline=True):
     model.generation_config.temperature = None
     model.generation_config.top_p = None
     model.generation_config.top_k = None
@@ -226,7 +224,7 @@ def greedy_generation(model, tokenizer, prompts, stop_at_newline=True):
         pad_token_id=tokenizer.eos_token_id,
         do_sample=False,
         eos_token_id=eos_token_id,
-        max_new_tokens=10)
+        max_new_tokens=max_new_tokens)
     
     generated_token_ids = outputs[:, inputs.input_ids.shape[1]:]
     generated_texts = tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)
@@ -236,33 +234,14 @@ def greedy_generation(model, tokenizer, prompts, stop_at_newline=True):
     # new_generated_texts = [gen[len(prompt):] for gen, prompt in zip(generated_texts, [prompt for prompt in prompts for _ in range(100)])]
     return generated_texts
 
-def reasoning_generation(model, tokenizer, instruction, prompts, temperature, top_p, max_new_tokens):
-    assert "Qwen3ForCausalLM" in model.config.architectures, "Reasoning generation is only supported for Qwen models."
+def thinking_generation(model, tokenizer, prompts, temperature, top_p, max_new_tokens):
+    assert "Qwen3ForCausalLM" in model.config.architectures, "Thinking generation is only supported for Qwen models."
     model.generation_config.temperature = temperature
     model.generation_config.top_p = top_p
     model.generation_config.pad_token_id = tokenizer.eos_token_id
 
-    messages = []
-    for prompt in prompts:
-        messages.append([
-            {
-                "role": "system",
-                "content": instruction,
-            },
-            {
-                "role": "user", 
-                "content": prompt
-            }
-        ])
-    
-    messages = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=True
-    )
     model_inputs = tokenizer(
-        messages, 
+        prompts, 
         truncation=True, 
         padding=True, 
         padding_side='left',
@@ -286,7 +265,7 @@ def reasoning_generation(model, tokenizer, instruction, prompts, temperature, to
         answer = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
         thinkings.append(thinking_content)
         answers.append(answer)
-    return messages, thinkings, answers
+    return thinkings, answers
 
 def prompt_ppl(model, tokenizer, q_len, prompts):
     tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -506,27 +485,35 @@ def dump_json(obj, filename, pretty=False):
             json.dump(obj, fp, ensure_ascii=False)
 
 
-def get_baseline_dumpfile(dataset, args):
-    if args.method == "origin":
-        dump_file = f"{dataset.dataset_root}/baseline_origin"
-    elif args.method == "per_prompt":
-        dump_file = f"{dataset.dataset_root}/baseline_per_prompt"
+def get_baseline_dump_path(dataset, args):
+    if args.method == "per_prompt":
+        dump_folder = f"{dataset.dataset_root}/baseline_per_prompt"
     elif args.method == "ppl":
-        dump_file = f"{dataset.dataset_root}/baseline_ppl"
+        dump_folder = f"{dataset.dataset_root}/baseline_ppl"
     else:  # args.method == "all"
         raise NotImplementedError("Method 'all' is not implemented in this script.")    
 
-    dump_file += f".{args.num_fewshots}shots"
-    dump_file += f".{args.num_paraphrases}paras"
-    dump_file += f".temp{args.temperature}"
-    dump_file += f".topp{args.top_p}"
-    dump_file += f".maxnew{args.max_new_tokens}"
-    dump_file += f".repeat{args.repeat}"
+    dump_folder += f".{args.num_fewshots}shots"
+    if args.thinking:
+        dump_folder += f".temp{args.temperature}"
+        dump_folder += f".topp{args.top_p}"
+        dump_folder += f".repeat{args.repeat}"
     if args.additional_paraphrases_file:
-        dump_file += f".selfparas"
-    dump_file += ".feather"
+        dump_folder += f".selfparas"
+    if args.version is not None and args.version != "":
+        dump_folder += f".{args.version}"
 
-    return dump_file
+    os.makedirs(dump_folder, exist_ok=True)
+    return dump_folder, os.path.join(dump_folder, "baseline.feather")
+
+def load_tokenizer(model_name):
+    if model_name not in MODEL_PATHs:
+        raise ValueError(f"Model {model_name} is not supported. Please choose from {list(MODEL_PATHs.keys())}.")
+    model_path = MODEL_PATHs.get(model_name, model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    return tokenizer
 
 def load_model_tokenizer(model_name):
     if model_name not in MODEL_PATHs:

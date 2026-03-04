@@ -4,6 +4,7 @@ import random
 from abc import abstractmethod
 
 import pandas as pd
+from numpy import isin
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -166,19 +167,90 @@ class ParaPharaseDataset:
         answer = example["answers"][0]
         return f"Q: {question}\nA: {answer}"
 
-    def construct_prompts(self, few_shot_examples, questions, instruction=None):
-        if instruction is None:
-            instruction = self.instruction
-        prompts = [f"{instruction}\n\n{few_shot_examples}\n\nQ: {question}\nA:" for question in questions]
-        return prompts
+    def construct_prompts(self, instruction, few_shot_examples, paraphrases, series_ensemble):
+        assert isinstance(instruction, str), "Instruction must be a string"
+        assert isinstance(few_shot_examples, str) or few_shot_examples is None, "Few-shot examples must be a string or None"
+        assert isinstance(paraphrases, list) and all(isinstance(q, str) for q in paraphrases), "Paraphrases must be a list of strings"
+        if series_ensemble:
+            # These paraphrases will be concatenated into a single prompt for generation, 
+            # with few-shot examples included at the beginning of the prompt
+            context = f"{instruction}\n\n{few_shot_examples}\n\nQ: " if few_shot_examples else f"{instruction}\n\nQ: "
+            paraphrase_qs = [f"{question}\n" for question in paraphrases]
+            paraphrases = "".join(paraphrase_qs)
+            answer = "A:"
+            metadata = {
+                "len_context": len(context),
+                "len_paras": [len(question) for question in paraphrase_qs],
+                "len_answer": len(answer),
+            }
+            return f"{context}{paraphrases}{answer}", metadata
+        else:
+            # in non-series-ensemble setting, each paraphrase is a separate prompt and 
+            # does not need to be paraphrases of the same question
+            questions = paraphrases 
+            return [f"{instruction}\n\n{few_shot_examples}\n\nQ: {question}\nA:" for question in questions]
 
-    def construct_prompts_for_reasoning(self, few_shot_examples, questions):
-        assert few_shot_examples == "", f"Few-shot examples are not supported for reasoning generation. but got {few_shot_examples}."
-        prompts = questions
-        return prompts
+    def construct_prompts_for_thinking(self, tokenizer, instruction, questions, series_ensemble=False, thinkings=None):
+        messages = []
+        assert isinstance(instruction, str), "Instruction must be a string"
+        assert isinstance(questions, list) and all(isinstance(q, str) for q in questions), "Questions must be a list of paraphrases (strings)"
+        assert isinstance(thinkings, list) and all(isinstance(t, str) for t in thinkings), "Thinkings must be a list of strings"
+        if series_ensemble:
+            # In series ensemble setting, we concatenate all paraphrases into one prompt.
+            # Each paraphrase + its thinking forms one segment for FlexAttention masking.
+            # Structure: [system instruction] [user Q1 + assistant <think>T1</think>] ... [generation prompt]
+            assert thinkings is not None, "Thinkings must be provided for series ensemble"
+            assert len(questions) == len(thinkings), "Number of questions and thinking must match"
 
-    def construct_prompts_with_paraphrases(self, few_shot_examples, paraphrases):
-        context = f"{self.instruction}\n\n{few_shot_examples}\n\n" if few_shot_examples else f"{self.instruction}\n\n"
+            # Qwen3 chat format tokens
+            IM_START = "<|im_start|>"
+            IM_END = "<|im_end|>"
+
+            # Build prompt manually because apply_chat_template strips <think> tags
+            # from assistant turns that precede the last user query.
+            # Format: system\n...<|im_end|>\n [user\n...<|im_end|>\n assistant\n<think>...\n</think>\n\n...<|im_end|>\n]* assistant\n
+            context = f"{IM_START}system\n{instruction}{IM_END}\n"
+
+            para_parts = []
+            for question, thinking in zip(questions, thinkings):
+                if not thinking.strip().endswith("</think>"):
+                    continue
+                user_part = f"{IM_START}user\n{question}{IM_END}\n"
+                assistant_part = f"{IM_START}assistant\n{thinking}\n\n{IM_END}\n"
+                para_parts.append(user_part + assistant_part)
+
+            # Generation prompt: the final assistant turn (model will start thinking here)
+            
+            prompt = context + "".join(para_parts)
+
+            # Compute segment metadata (character-level boundaries) for FlexAttention
+            len_context = len(context)
+            para_lengths = [len(part) for part in para_parts]
+            len_answer = 0
+
+            metadata = {
+                "len_context": len_context,
+                "len_paras": para_lengths,
+                "len_answer": len_answer,
+            }
+            return prompt, metadata
+        
+        else:
+            # Return a list of messages, each corresponding to a separate prompt for each paraphrase
+            for question in questions: 
+                messages.append([
+                    {"role": "system", "content": instruction,},
+                    {"role": "user", "content": question}
+                ])
+            messages = tokenizer.apply_chat_template(
+                messages, tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=True
+            )
+            return messages
+
+    def construct_prompts_with_paraphrases(self, instruction, few_shot_examples, paraphrases):
+        context = f"{instruction}\n\n{few_shot_examples}\n\n" if few_shot_examples else f"{instruction}\n\n"
         paraphrase_qs = [f"Q: {question}\nA:" for question in paraphrases]
         paraphrases = "".join(paraphrase_qs)
         metadata = {
@@ -187,8 +259,8 @@ class ParaPharaseDataset:
         }
         return f"{context}{paraphrases}", metadata
 
-    def construct_prompts_single_para_qapair(self, few_shot_examples, paraphrases):
-        context = f"{self.instruction}\n\n{few_shot_examples}\n\nQ: " if few_shot_examples else f"{self.instruction}\n\nQ: "
+    def construct_prompts_single_para_qapair(self, instruction, few_shot_examples, paraphrases):
+        context = f"{instruction}\n\n{few_shot_examples}\n\nQ: " if few_shot_examples else f"{instruction}\n\nQ: "
         paraphrase_qs = [f"{question}\n" for question in paraphrases]
         paraphrases = "".join(paraphrase_qs)
         answer = "A:"
@@ -199,8 +271,8 @@ class ParaPharaseDataset:
         }
         return f"{context}{paraphrases}{answer}", metadata
 
-    def construct_explicit_prompts(self, paraphrases):
-        context = f"{self.instruction}\n"
+    def construct_explicit_prompts(self, instruction, paraphrases):
+        context = f"{instruction}\n"
         paraphrase_qs = [f"{question}\n" for question in paraphrases]
         paraphrases = "".join(paraphrase_qs)
         metadata = {
@@ -289,14 +361,14 @@ class WebQADataset(ParaPharaseDataset):
         return "\n\n".join(self.format_example(self.train_ds[i]) for i in indices)
 
 class MyriadLamaDataset(ParaPharaseDataset):
-
-    def __init__(self, model_name, debug=False, paraphrase_file: str = None):
+    def __init__(self, model_name, paraphrase_file: str = None, debug=False):
         self.model_name = model_name
         self.debug = debug
-        dataset_name = "myriadlama-debug" if self.debug else "myriadlama"
-        super().__init__(dataset_name, model_name, paraphrase_file)
-        self.dataset_name = os.path.join(PROJECT_DATASET_ROOT, dataset_name, self.model_name)
-    
+        self.thinking = False
+        self.dataset_name = "myriadlama-debug" if self.debug else "myriadlama"
+        self.dataset_root = os.path.join(PROJECT_DATASET_ROOT, self.dataset_name, self.model_name)
+        super().__init__(self.dataset_name, model_name, paraphrase_file)
+
     @property
     def dataset_path(self):
         return os.path.join(self.dataset_root, "paraphrases_dataset")
@@ -479,8 +551,8 @@ Answer = <one letter>
     def instruction(self, instruction):
         self._instruction = instruction
     
-    def construct_prompts_with_paraphrases(self, few_shot_examples, paraphrases):
-        context = f"{self.instruction}\n\n{few_shot_examples}\n\n" if few_shot_examples else f"{self.instruction}\n\n"
+    def construct_prompts_with_paraphrases(self, instruction, few_shot_examples, paraphrases):
+        context = f"{instruction}\n\n{few_shot_examples}\n\n" if few_shot_examples else f"{instruction}\n\n"
         paraphrase_qs = [f"Q: {question}\nA:" for question in paraphrases]
         paraphrases = "".join(paraphrase_qs)
         metadata = {
@@ -489,24 +561,24 @@ Answer = <one letter>
         }
         return f"{context}{paraphrases}", metadata
 
-    def construct_multi_choice_prompts(self, few_shot_examples, paraphrases, choices_labels, choices_texts):
+    def construct_multi_choice_prompts(self, instruction, few_shot_examples, paraphrases, choices_labels, choices_texts):
         options_str = "\n".join([f"{label}. {text}" for label, text in zip(choices_labels, choices_texts)])
         
         prompts = []
         answer_part = "Answer =" if self.choice_labels[0][0] == " " else "Answer = "
         for paraphrase in paraphrases:
             if few_shot_examples:
-                prompt = f"{self.instruction}\n\n{few_shot_examples}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\n{answer_part}"
+                prompt = f"{instruction}\n\n{few_shot_examples}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\n{answer_part}"
             else:
-                prompt = f"{self.instruction}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\n{answer_part}"
+                prompt = f"{instruction}\n\nQuestion:\n{paraphrase}\n\nOptions:\n{options_str}\n\n{answer_part}"
             prompts.append(prompt)
         return prompts
     
-    def construct_prompts_single_para_qapair(self, few_shot_examples, paraphrases, choices_labels, choices_texts):
+    def construct_prompts_single_para_qapair(self, instruction, few_shot_examples, paraphrases, choices_labels, choices_texts):
         if few_shot_examples:
-            context_str = f"{self.instruction}\n\n{few_shot_examples}\n\nQuestion:\n"
+            context_str = f"{instruction}\n\n{few_shot_examples}\n\nQuestion:\n"
         else:
-            context_str = f"{self.instruction}\n\nQuestion:\n"
+            context_str = f"{instruction}\n\nQuestion:\n"
 
         paraphrase_qs = [f"{question}\n" for question in paraphrases]
         paraphrase_str = "".join(paraphrase_qs)
@@ -662,29 +734,27 @@ class HotpotDataset(ParaPharaseDataset):
             self, 
             model_name, 
             debug=False, 
-            reasoning=False,
-            num_paraphrases: int = None,
+            thinking=False,
             paraphrase_file: str = None
         ):
 
         self.model_name = model_name
         self.debug = debug
-        self.reasoning = reasoning
-        self.num_paraphrases = 4 if num_paraphrases is None else num_paraphrases
-        suffix = "-reasoning" if self.reasoning else ""
+        self.thinking = thinking
+        suffix = "-thinking" if self.thinking else ""
         if self.debug:
             suffix += "-debug"
         
         self.dataset_name = "hotpot" + suffix
         self.dataset_root = os.path.join(PROJECT_DATASET_ROOT, self.dataset_name, self.model_name)
-        print(f"Initializing HotpotQA Paraphrase Dataset: reasoning={self.reasoning}, debug={self.debug}, dataset_name={self.dataset_name}")
+        print(f"Initializing HotpotQA Paraphrase Dataset: thinking={self.thinking}, debug={self.debug}, dataset_name={self.dataset_name}")
         super().__init__(self.dataset_name, model_name, paraphrase_file)
         
-        if reasoning:
+        if thinking:
             self._instruction = \
                 "Think through the given question, then output only the final answer.\n" + \
                 "Output format (strict): ### Answer: <final answer>\n" + \
-                "Do not include any explanation, reasoning, citations, or extra text—only the single answer line."
+                "Do not include any explanation, thinking, citations, or extra text—only the single answer line."
         else:
             self._instruction = "Answer the question based on the provided context in one or two sentences."
         
@@ -770,15 +840,13 @@ class HotpotDataset(ParaPharaseDataset):
             if self.additional_paraphrases is not None:
                 assert uuid in self.additional_paraphrases, f"⚠️ Hotpot uuid {uuid} not found in additional paraphrases file"
                 _paraphrases = [self.additional_paraphrases[uuid]["seed_prompt"]] + self.additional_paraphrases[uuid]["auto_paraphrases"]
-                _is_origs = [True] + [False] * len(self.additional_paraphrases[uuid]["auto_paraphrases"])
-                _paraphrases = _paraphrases[: self.num_paraphrases + 1]
-                _is_origs = _is_origs[: self.num_paraphrases + 1]
+                _is_origs = [True] + [False] * len(self.additional_paraphrases[uuid]["auto_paraphrases"])                
             else:
                 manual_list = item["manual_paraphrases"]
-                auto_list = item["auto_paraphrases"][:self.num_paraphrases]
+                auto_list = item["auto_paraphrases"]
                 _paraphrases = manual_list + auto_list
-                _is_origs = [True] + [False] * self.num_paraphrases
-                assert len(_paraphrases) == 1 + self.num_paraphrases, f"⚠️ Hotpot uuid {uuid}: total paraphrases {len(_paraphrases)} != {1 + self.num_paraphrases}"
+                _is_origs = [True] + [False] * len(auto_list)
+                assert len(_paraphrases) == 1 + len(auto_list), f"⚠️ Hotpot uuid {uuid}: total paraphrases {len(_paraphrases)} != {1 + len(auto_list)}"
             paraphrases.append(_paraphrases)
             is_origs.append(_is_origs)
         return uuids, answers, list(zip(*paraphrases)), list(zip(*is_origs))
@@ -801,47 +869,44 @@ class HotpotDataset(ParaPharaseDataset):
     
 def get_dataset_instance(
         dataset_name, model_name, 
-        debug=False, reasoning=False,
-        num_paraphrases=None,
+        debug=False, thinking=False,
         additional_paraphrases_file=None):
     if dataset_name == "webqa":
+        assert not thinking, "``thinking`` generation is not supported for WebQA dataset."
         from dataset import WebQADataset
         dataset = WebQADataset(model_name=model_name)
     elif dataset_name == "myriadlama":
+        assert not thinking, "``thinking`` generation is not supported for MyriadLAMA dataset."
         from dataset import MyriadLamaDataset
         dataset = MyriadLamaDataset(
             model_name=model_name, 
             debug=debug, 
-            num_paraphrases=num_paraphrases,
             paraphrase_file=additional_paraphrases_file)
     elif dataset_name == "commonsense":
+        assert not thinking, "``thinking`` generation is not supported for Commonsense dataset."
         from dataset import CommonsenseParaphraseDataset
         dataset = CommonsenseParaphraseDataset(
             model_name=model_name, 
             debug=debug, 
-            num_paraphrases=num_paraphrases,
             paraphrase_file=additional_paraphrases_file)
     elif dataset_name == "mmlu":
         from dataset import MMLUParaphraseDataset
         dataset = MMLUParaphraseDataset(
             model_name=model_name, 
             debug=debug, 
-            num_paraphrases=num_paraphrases,
             paraphrase_file=additional_paraphrases_file)
     elif dataset_name == "logiqa":
         from dataset import LogiQAParaphraseDataset
         dataset = LogiQAParaphraseDataset(
             model_name=model_name, 
             debug=debug, 
-            num_paraphrases=num_paraphrases,
             paraphrase_file=additional_paraphrases_file)
     elif dataset_name == "hotpot":
         from dataset import HotpotDataset
         dataset = HotpotDataset(
             model_name=model_name, 
             debug=debug, 
-            reasoning=reasoning,
-            num_paraphrases=num_paraphrases,
+            thinking=thinking,
             paraphrase_file=additional_paraphrases_file)
     else:
         raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', 'logiqa', or 'hotpot'.")

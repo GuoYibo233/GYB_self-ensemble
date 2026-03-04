@@ -3,7 +3,6 @@ import multiprocessing as mp
 import os
 import random
 import warnings
-from pdb import set_trace
 
 import numpy as np
 import pandas as pd
@@ -17,6 +16,7 @@ from utils import (
     init_spacy,
     lemmaize_chunk,
     load_model_tokenizer,
+    load_tokenizer,
 )
 
 warnings.filterwarnings("ignore", message=".*To copy construct from a tensor.*")
@@ -30,7 +30,7 @@ def ensemble_generation(
     prompts, 
     integration_method="max", 
     weights=None, 
-    max_new_tokens=10,
+    max_new_tokens=32,
     ensemble_method=None, 
     multilayer=False, 
     token_mode="last",
@@ -138,7 +138,14 @@ def ensemble_generation(
     generated_texts = tokenizer.batch_decode(generated, skip_special_tokens=True)
     return generated_texts[0].strip(), label_probs
 
-def sample_paraphrases_per_item(uuids, all_paraphrases, all_is_origs, num_paraphrases, num_samples, repeat_paras=False):
+def sample_paraphrases_per_item(
+        uuid, 
+        paraphrases, 
+        is_origs,
+        messages, 
+        num_paraphrases, 
+        num_samples, 
+        repeat_paras=False):
     """
     Sample paraphrases using the same logic as series_ensemble.py:
     1. Generate all permutations of paraphrase indices (or repeated patterns if repeat_paras=True)
@@ -148,49 +155,36 @@ def sample_paraphrases_per_item(uuids, all_paraphrases, all_is_origs, num_paraph
     Same uuid will always produce the same sampling results, matching series_ensemble.py.
     
     Args:
-        all_paraphrases: List of paraphrase lists, where all_paraphrases[i][j] is the i-th paraphrase version for the j-th item
+        paraphrases: List of paraphrase lists, where paraphrases[i][j] is the i-th paraphrase version for the j-th item
         num_paraphrases: Number of paraphrases to select in each sample
         num_samples: Number of different paraphrase combinations to generate per uuid
-        uuids: List of uuids for each item in the batch, used as random seeds
+        uuid: UUID for the current batch, used as random seed
         repeat_paras: If True, repeat the same paraphrase multiple times instead of using permutations
     
     Returns:
         List of samples, where each sample is (uuid, sampled_paraphrases_list) --
     """
-    batch_size = len(all_paraphrases[0])
-    num_paraphrase_versions = len(all_paraphrases)
+    all_samples = []    
+    # Handle special case: use all paraphrases
+    if num_paraphrases == -1: 
+        return (uuid, paraphrases, is_origs, messages)
     
-    all_samples = []
-    
-    # Process each item in the batch separately with deterministic sampling
-    for item_idx in range(batch_size):
-        uuid = uuids[item_idx]
-        # Get all paraphrases for this item
-        item_paraphrases = [all_paraphrases[i][item_idx] for i in range(num_paraphrase_versions)]
-        item_is_origs = [all_is_origs[i][item_idx] for i in range(num_paraphrase_versions)]
-        
-        # Handle special case: use all paraphrases
-        if num_paraphrases == -1: 
-            sampled_paraphrases = item_paraphrases
-            sammpled_is_origs = item_is_origs
-            all_samples.append((uuid, sampled_paraphrases, sammpled_is_origs))
-            continue
-        
-        # Generate all possible combinations
-        all_indices = list(range(len(item_paraphrases)))
-        effective_num_paraphrases = num_paraphrases if num_paraphrases <= len(all_indices) else len(all_indices)
-        if repeat_paras: # Repeat same paraphrase: [[0,0], [1,1], [2,2], ...]
-            all_sampled_paras = list([[n] * effective_num_paraphrases for n in all_indices])
-        else: # Use permutations: all ordered selections of num_paraphrases from available paraphrases
-            all_sampled_paras = itertools.permutations(all_indices, effective_num_paraphrases)
+    # Generate all possible combinations
+    all_indices = list(range(len(paraphrases)))
+    effective_num_paraphrases = num_paraphrases if num_paraphrases <= len(all_indices) else len(all_indices)
+    if repeat_paras: # Repeat same paraphrase: [[0,0], [1,1], [2,2], ...]
+        all_sampled_paras = list([[n] * effective_num_paraphrases for n in all_indices])
+    else: # Use permutations: all ordered selections of num_paraphrases from available paraphrases
+        all_sampled_paras = itertools.permutations(all_indices, effective_num_paraphrases)
 
-        random.seed(uuid)
-        all_sampled_paras_list = list(all_sampled_paras)
-        sampled_combinations = random.sample(all_sampled_paras_list, k=min(num_samples, len(all_sampled_paras_list)))
-        for paraids in sampled_combinations:
-            sampled_paraphrases = [item_paraphrases[i] for i in paraids]
-            sammpled_is_origs = [item_is_origs[i] for i in paraids]
-            all_samples.append((uuid, sampled_paraphrases, sammpled_is_origs))
+    random.seed(uuid)
+    all_sampled_paras_list = list(all_sampled_paras)
+    sampled_combinations = random.sample(all_sampled_paras_list, k=min(num_samples, len(all_sampled_paras_list)))
+    for paraids in sampled_combinations:
+        sampled_paraphrases = [paraphrases[i] for i in paraids]
+        sammpled_is_origs = [is_origs[i] for i in paraids]
+        sampled_messages = [messages[i] for i in paraids]
+        all_samples.append((uuid, sampled_paraphrases, sammpled_is_origs, sampled_messages))
     
     return all_samples
 
@@ -336,10 +330,6 @@ def make_ffn_mid_activation_hook(
         assert am.shape[0] == B and am.shape[1] == T, (am.shape, x.shape)
 
         if token_mode == "all":
-            # For each time step, compute weighted mean over batch and blend
-            # x[:, t, :] <- (1-alpha)*x[:, t, :] + alpha*mean_t
-            # mean_t: [1,D]
-            # This is heavier but simple.
             for t in range(T):
                 if not use_max:
                     mean_t = _weighted_batch_average(x[:, t, :], weights)  # [1,D]
@@ -420,11 +410,7 @@ def next_token_logits_with_weighted_ffn_midavg(
     return next_logits
 
 def get_parallel_ensemble_dumpfile(dataset, args):
-    dataset_name = getattr(dataset, 'name', None) or getattr(dataset, '__class__', type(dataset)).__name__.replace('Dataset', '').lower()
-    dump_file = f"{dataset.dataset_root}/{dataset_name}.logits.{args.logits_ensemble_method}."
-    if args.repeat_paras:
-        dump_file += "repeatparas."
-    
+    dump_file = f"{dataset.dataset_root}/parallel.{args.logits_ensemble_method}."
     if args.ensemble_method == "layer_output_avg":
         dump_file += f"avglayer.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
     elif args.ensemble_method == "ffn_activation_avg":
@@ -433,84 +419,66 @@ def get_parallel_ensemble_dumpfile(dataset, args):
         dump_file += f"maxffn.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
     if args.multilayer:
         dump_file += "multilayer."
-    if args.additional_paraphrases_file is not None:
-        dump_file += "selfparas."
-    if args.num_fewshots != 5:
-        dump_file += f"{args.num_fewshots}fshots."
     
     dump_file += f"{args.num_samples}samples.{args.num_paraphrases}paras.feather"
-
-    # If user is y-guo, ensure dump_file is saved to /home/y-guo/self-ensemble
-    _current_user = os.environ.get('USER', 'unknown')
-    if _current_user == 'y-guo':
-        if not dump_file.startswith("/home/y-guo/self-ensemble/"):
-            # Extract the relative path from dataset_root and reconstruct
-            dump_file = dump_file.replace(dataset.dataset_root, "/home/y-guo/self-ensemble")
-            if not dump_file.startswith("/home/y-guo/self-ensemble/"):
-                dump_file = "/home/y-guo/self-ensemble/" + os.path.basename(dump_file)
-        print(f"ℹ️  User y-guo detected, saving to: {dump_file}")
-    
     return dump_file
 
-def craft_prompts_with_reasoning_path(dataset, tokenizer, baseline_file):
-    """
-    Craft prompts for reasoning tasks using existing baseline generations.
-    The baseline_file should contain columns: uuid, question, baseline_generation
-    """
+def craft_prompts_from_baseline_file(baseline_file, thinking):
     df = pd.read_feather(baseline_file)
-    def craft_thinking_prompts(prompts, thinkings):
-        messages = []
-        for prompt in prompts:
-            messages.append([
-                {
-                    "role": "system",
-                    "content": dataset.instruction,
-                },
-                {
-                    "role": "user", 
-                    "content": prompt
-                }
-            ])
-        messages = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=True
-        )
-        return [f"{message}{thinking}" for message, thinking in zip(messages, thinkings)]
-
     for uuid, subdf in df.groupby('uuid'):
         subdf = subdf.reset_index(drop=True)
-        subdf = subdf[subdf['thinking'].str.len() > 0]
+        if thinking:
+            subdf = subdf[subdf['thinking'].str.len() > 0]
         if len(subdf) == 0:
-            print(f"⚠️  Warning: No valid reasoning entries for uuid {uuid}, skipping.")
+            print(f"⚠️  Warning: No valid thinking entries for uuid {uuid}, skipping.")
             continue
 
-        paraphrases = craft_thinking_prompts(subdf["prompt"].tolist(), subdf["thinking"].tolist())
-        paraphrases = [(paraphrase, ) for paraphrase in paraphrases]
-        is_origs = [(is_orig,) for is_orig in subdf["is_orig"].tolist()]
+        
+        if thinking:
+            messages = [
+                (paraphrase, is_orig, f"{prompt}{thinking}")
+                for paraphrase, is_orig, prompt, thinking in zip(
+                    subdf["paraphrase"].tolist(), 
+                    subdf["is_origs"].tolist(), 
+                    subdf["prompt"].tolist(), 
+                    subdf["thinking"].tolist())
+                if thinking.strip().endswith("</think>")
+            ]
+            paraphrases, is_origs, messages = zip(*messages) if messages else ([], [], [])
+        else:
+            paraphrases = subdf["paraphrase"].tolist()
+            is_origs = subdf["is_orig"].tolist()
+            messages = subdf["prompt"].tolist()
+        
         yield (
-            [uuid], 
-            [subdf['answers'].tolist()[0].tolist()],
-            paraphrases, 
+            uuid, 
+            subdf['answers'].tolist()[0].tolist(),
+            paraphrases,
             is_origs,
-        )
+            messages
+        ) 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Ensemble generation")
+    # General parameters
     parser.add_argument("--model", type=str, default="llama3.2_3b_it", help="Path to the pre-trained model.")
     parser.add_argument("--dataset", type=str, required=True, choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa", "hotpot"], help="Dataset to use for generating paraphrases.")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on (default: cuda).")
-    parser.add_argument("--num_paraphrases", type=int, default=-1, help="Number of paraphrases to use in each sample (default: 2)")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to run the model on (default: cuda).")    
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose output")
+    parser.add_argument("--rewrite", action="store_true", help="Rewrite existing output files")
+    
+    # Prompts sampling/construction parameters
+    parser.add_argument("--baseline_file", type=str, required=True, help="Path to baseline generations file (required for reasoning mode)")
+    parser.add_argument("--additional_paraphrases_file", type=str, default=None, help="Path to additional paraphrases file (for datasets that support it)")
+    parser.add_argument("--repeat_paras", action="store_true", help="Whether to repeat the same paraphrase multiple times instead of using permutations (for small number of paraphrases)")
     parser.add_argument("--num_samples", type=int, default=1, help="Number of different paraphrase combinations to generate per question (default: 5)")
-    parser.add_argument("--num_fewshots", type=int, default=0, help="Number of few-shot examples to use (default: 5)")
-    parser.add_argument("--repeat_paras", action="store_true", help="Repeat the same paraphrase multiple times instead of using permutations")
-    parser.add_argument("--max_samples", type=int, default=None, help="Maximum number of samples to generate (default: None, process all)")
-    
-    parser.add_argument("--logits_ensemble_method", type=str, default="avg", choices=["max", "avg", "weighted_avg", "weighted_max"],
+    parser.add_argument("--num_paraphrases", type=int, default=-1, help="Number of paraphrases to use in each sample (default: 2)")    
+
+    # Ensemble parameters
+    parser.add_argument("--logits_ensemble_method", type=str, default="avg", 
+                        choices=["max", "avg", "weighted_avg", "weighted_max"],
                         help="Integration method for ensemble generation")
-    
     parser.add_argument("--ensemble_method", type=str, default=None, 
                         choices=["layer_output_avg", "ffn_activation_avg", "ffn_activation_max"], 
                         help="Method for ensemble internal states within Transformer layers, by either using layer outputs or FFN activations")
@@ -518,12 +486,8 @@ if __name__ == "__main__":
     parser.add_argument("--ensemble_alpha", type=float, default=1.0, help="alpha for ensemble merging of transformer outputs")
     parser.add_argument("--multilayer", action="store_true", help="Use only a single layer's output for ensemble (not used currently)")
     parser.add_argument("--token_mode", type=str, default="last", choices=["last", "all"], help="Token mode")
-    parser.add_argument("--reasoning", action="store_true", help="Enable reasoning mode (not used currently)")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose output")
-    parser.add_argument("--rewrite", action="store_true", help="Rewrite existing output files")
+    parser.add_argument("--thinking", action="store_true", help="Enable thinking mode")
     
-    parser.add_argument("--additional_paraphrases_file", type=str, default=None, help="Path to additional paraphrases file (for datasets that support it)")
-    parser.add_argument("--baseline_file", type=str, default=None, help="Path to baseline generations file (required for reasoning mode)")
     args = parser.parse_args()    
 
     # Load dataset
@@ -531,95 +495,72 @@ if __name__ == "__main__":
         dataset_name=args.dataset,
         model_name=args.model,
         debug=args.debug,
-        reasoning=args.reasoning,
-        num_paraphrases=args.num_paraphrases,
+        thinking=args.thinking,
         additional_paraphrases_file=args.additional_paraphrases_file,
     )
 
     # Load model and tokenizer
-    model, tokenizer = load_model_tokenizer(args.model)
-    max_new_tokens = 10 if args.num_fewshots > 0 else 20
+    tokenizer = load_tokenizer(args.model)
+    max_new_tokens = 32
     
-    if not args.reasoning:
-        dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
-    else:
-        assert args.reasoning and \
-            args.baseline_file is not None and \
-            dataset.is_multi_choice == False, \
-            "Reasoning mode requires baseline_file and non-multi-choice dataset."
-        dataloader = craft_prompts_with_reasoning_path(dataset, tokenizer, args.baseline_file)
+    group_by_uuid = craft_prompts_from_baseline_file(args.baseline_file, args.thinking)
     
     # Determine dump file path
-    if args.baseline_file is not None:
-        dataset.dataset_root = os.path.join(dataset.dataset_root, os.path.basename(args.baseline_file).replace('.feather', ''))
-        os.makedirs(dataset.dataset_root, exist_ok=True)
-    dump_file = get_parallel_ensemble_dumpfile(dataset, args)    
+    dataset.dataset_root = os.path.dirname(args.baseline_file)
+    os.makedirs(dataset.dataset_root, exist_ok=True)
+    dump_file = get_parallel_ensemble_dumpfile(dataset, args)
     if os.path.exists(dump_file) and not args.rewrite:
         print(f"✅ File {dump_file} already exists, skipping generation.")
         exit(0)
 
+    model, tokenizer = load_model_tokenizer(args.model)
     print(f"🔄 Starting {args.logits_ensemble_method} logits ensembling to {dump_file}")
     if args.logits_ensemble_method.startswith("weighted_"):
         conf_df = pd.read_feather(os.path.join(dataset.dataset_root, "confidence.feather"))
     
-    df = pd.DataFrame(columns=["uuid", "answers", "prediction", "generation"])
-    if args.max_samples:
-        print(f"Processing maximum {args.max_samples} samples")
+    df = pd.DataFrame(columns=["uuid", "answers", "prediction", "generation", "prompt", "paraphrases", "is_orig"])
     
-    few_shot_examples = dataset.get_few_shot_examples(k=args.num_fewshots) if args.num_fewshots > 0 else ""
-
     all_samples = []
     uuid_count = 0
-    for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
+    for batch_data in tqdm(group_by_uuid, desc="Preparing samples", dynamic_ncols=True):
         if dataset.is_multi_choice:
-            uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels, is_origs = batch_data
+            uuid, answers, paraphrases, choices_labels, choices_texts, answer_labels, is_origs = batch_data
         else:
-            uuids, answers, all_paraphrases, is_origs = batch_data
-            choices_labels = [None] * len(uuids)
-            choices_texts = [None] * len(uuids)
-            answer_labels = [None] * len(uuids)
+            uuid, answers, paraphrases, is_origs, messages = batch_data
+            choices_labels = None
+            choices_texts = None
+            answer_labels = None
 
-        # If multi-choice, enforce max_samples as max number of unique uuids (questions)
-        if args.max_samples:
-            if uuid_count >= args.max_samples:
-                break
-            # Only take up to remaining uuids
-            take_n = min(args.max_samples - uuid_count, len(uuids))
-            uuids = uuids[:take_n]
-            answers = answers[:take_n]
-            all_paraphrases = [p[:take_n] for p in all_paraphrases]
-            choices_labels = choices_labels[:take_n]
-            choices_texts = choices_texts[:take_n]
-            answer_labels = answer_labels[:take_n]
-        
         samples = sample_paraphrases_per_item(
-            uuids=uuids,
-            all_paraphrases=all_paraphrases, 
-            all_is_origs=is_origs,
+            uuid=uuid,
+            paraphrases=paraphrases, 
+            is_origs=is_origs,
+            messages=messages,
             num_paraphrases=args.num_paraphrases, 
             num_samples=args.num_samples,
             repeat_paras=args.repeat_paras
         )
         
-        for uuid, sampled_paraphrases, sampled_is_origs in samples:
-            idx = uuids.index(uuid)
+        for uuid, sampled_paraphrases, sampled_is_origs, sampled_messages in samples:
             if dataset.is_multi_choice:
                 all_samples.append((
-                    uuid, answers[idx], sampled_paraphrases, sampled_is_origs,
-                    choices_labels[idx], choices_texts[idx], answer_labels[idx]))
+                    uuid, answers, 
+                    sampled_paraphrases, sampled_is_origs, sampled_messages,
+                    choices_labels, choices_texts, answer_labels))
             else:
-                all_samples.append((uuid, answers[idx], sampled_paraphrases, sampled_is_origs, None, None, None))
-        if args.max_samples:
-            uuid_count += len(uuids)
-    
+                all_samples.append((
+                    uuid, answers, 
+                    sampled_paraphrases, sampled_is_origs, sampled_messages, 
+                    None, None, None))
+                
     print(f"Total samples to process: {len(all_samples)}")
     
     # Process each sample
     for sample_data in tqdm(all_samples, desc="Generating", dynamic_ncols=True):
         if dataset.is_multi_choice:
-            uuid, answer, sampled_paraphrases, sampled_is_origs, choices_label, choices_text, answer_label = sample_data
+            uuid, answer, sampled_paraphrases, sampled_is_origs, sampled_messages, choices_label, choices_text, answer_label = sample_data
         else:
-            uuid, answer, sampled_paraphrases, sampled_is_origs, _, _, _ = sample_data
+            uuid, answer, sampled_paraphrases, sampled_is_origs, sampled_messages, _, _, _ = sample_data
             choices_label = None
             choices_text = None
             answer_label = None
@@ -637,22 +578,11 @@ if __name__ == "__main__":
                     confidences.append(float(_sdf["confidence"].values[0]))
                 else:
                     confidences.append(1.0)  # Default confidence
-            
-            # Use different prompt construction based on dataset type
-        if dataset.is_multi_choice:
-            all_prompts = dataset.construct_multi_choice_prompts(
-                few_shot_examples, 
-                sampled_paraphrases,
-                choices_label,
-                choices_text
-            )
-        else:
-            all_prompts = dataset.construct_prompts(few_shot_examples, sampled_paraphrases)
-
+        
         generation, label_probs = ensemble_generation(
             model,
             tokenizer,
-            prompts=all_prompts, 
+            prompts=sampled_messages, 
             integration_method=args.logits_ensemble_method,
             weights=[confidences] if confidences else None, 
             max_new_tokens=max_new_tokens, 
@@ -664,6 +594,7 @@ if __name__ == "__main__":
             choice_labels=dataset.choice_labels)
         
         labels, label_probs = zip(*label_probs) if label_probs else ([], [])
+        
         # Extract prediction - for multi-choice, extract first capital letter
         if dataset.is_multi_choice:
             import re
@@ -676,7 +607,7 @@ if __name__ == "__main__":
             "uuid": [uuid],
             "paraphrases": [sampled_paraphrases],
             "is_orig": [sampled_is_origs],
-            "prompts": [all_prompts],
+            "prompts": [sampled_messages],
             "answers": [answer],
             "prediction": [prediction],
             "generation": [generation],
@@ -692,7 +623,6 @@ if __name__ == "__main__":
         
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
 
-    
     chunks = np.array_split(df, num_parts)
     with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
         results = pool.map(lemmaize_chunk, chunks)

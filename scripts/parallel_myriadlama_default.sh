@@ -10,8 +10,15 @@ if [ "$MODEL_TYPE" == "base" ]; then
     MODELS="llama3.2_1b llama3.2_3b llama3.1_8b"
 elif [ "$MODEL_TYPE" == "it" ]; then
     MODELS="llama3.2_1b_it llama3.2_3b_it llama3.1_8b_it"
+elif [ "$MODEL_TYPE" == "llama" ]; then
+    MODELS="llama3.2_1b llama3.2_3b llama3.1_8b"
+elif [ "$MODEL_TYPE" == "qwen3" ]; then
+    MODELS="qwen3_1.7b qwen3_4b qwen3_8b qwen3_14b qwen3_32b"
 elif [ "$MODEL_TYPE" == "others" ]; then
     MODELS="qwen3_30b pythia_2.8b qwen3_4b"
+else
+    echo "Unknown MODEL_TYPE: $MODEL_TYPE"
+    exit 1
 fi
 
 for MODEL in $MODELS ; do
@@ -28,8 +35,18 @@ for MODEL in $MODELS ; do
         LAYER=21
     elif [ "$MODEL" == "qwen2.5_14b" ] || [ "$MODEL" == "qwen2.5_14b_it" ]; then
         LAYER=36
+    elif [ "$MODEL" == "qwen3_1.7b" ]; then
+        LAYER=21
+    elif [ "$MODEL" == "qwen3_4b" ]; then
+        LAYER=27
+    elif [ "$MODEL" == "qwen3_8b" ]; then
+        LAYER=27
+    elif [ "$MODEL" == "qwen3_14b" ]; then
+        LAYER=30
     elif [ "$MODEL" == "qwen3_30b" ]; then
         LAYER=36
+    elif [ "$MODEL" == "qwen3_32b" ]; then
+        LAYER=48
     elif [ "$MODEL" == "qwen3_235b" ]; then
         LAYER=71
     elif [ "$MODEL" == "pythia_2.8b" ]; then
@@ -41,23 +58,25 @@ for MODEL in $MODELS ; do
 
     CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
         --logits_ensemble_method avg \
+        --debug \
         --model $MODEL \
         --dataset myriadlama \
         --num_paraphrases $NUM_PARAS \
         --num_fewshots $NUM_FEWSHOTS \
         --num_samples 5
     
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
-        --logits_ensemble_method max \
-        --model $MODEL \
-        --dataset myriadlama \
-        --num_paraphrases $NUM_PARAS \
-        --num_fewshots $NUM_FEWSHOTS \
-        --num_samples 5
+    # CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
+    #     --logits_ensemble_method max \
+    #     --model $MODEL \
+    #     --dataset myriadlama \
+    #     --num_paraphrases $NUM_PARAS \
+    #     --num_fewshots $NUM_FEWSHOTS \
+    #     --num_samples 5
     
     CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
         --logits_ensemble_method avg \
         --model $MODEL \
+        --debug \
         --dataset myriadlama \
         --num_paraphrases $NUM_PARAS \
         --num_fewshots $NUM_FEWSHOTS \
@@ -68,55 +87,59 @@ for MODEL in $MODELS ; do
         --token_mode last \
         --multilayer
     
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
-        --logits_ensemble_method avg \
-        --model $MODEL \
-        --dataset myriadlama \
-        --num_paraphrases $NUM_PARAS \
-        --num_fewshots $NUM_FEWSHOTS \
-        --num_samples 5 \
-        --ensemble_method ffn_activation_avg \
-        --ensemble_layer $LAYER \
-        --ensemble_alpha 1 \
-        --token_mode last \
-        --multilayer
+    # CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
+    #     --logits_ensemble_method avg \
+    #     --model $MODEL \
+    #     --debug \
+    #     --dataset myriadlama \
+    #     --num_paraphrases $NUM_PARAS \
+    #     --num_fewshots $NUM_FEWSHOTS \
+    #     --num_samples 5 \
+    #     --ensemble_method ffn_activation_avg \
+    #     --ensemble_layer $LAYER \
+    #     --ensemble_alpha 1 \
+    #     --token_mode last \
+    #     --multilayer
     
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
-        --logits_ensemble_method avg \
-        --model $MODEL \
-        --dataset myriadlama \
-        --num_paraphrases $NUM_PARAS \
-        --num_fewshots $NUM_FEWSHOTS \
-        --num_samples 5 \
-        --ensemble_method ffn_activation_max \
-        --ensemble_layer $LAYER \
-        --ensemble_alpha 1 \
-        --token_mode last \
-        --multilayer
+    # CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
+    #     --logits_ensemble_method avg \
+    #     --model $MODEL \
+    #     --debug \
+    #     --dataset myriadlama \
+    #     --num_paraphrases $NUM_PARAS \
+    #     --num_fewshots $NUM_FEWSHOTS \
+    #     --num_samples 5 \
+    #     --ensemble_method ffn_activation_max \
+    #     --ensemble_layer $LAYER \
+    #     --ensemble_alpha 1 \
+    #     --token_mode last \
+    #     --multilayer
     
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
-        --logits_ensemble_method max \
-        --model $MODEL \
-        --dataset myriadlama \
-        --num_paraphrases $NUM_PARAS \
-        --num_fewshots $NUM_FEWSHOTS \
-        --num_samples 5 \
-        --ensemble_method ffn_activation_avg \
-        --ensemble_layer $LAYER \
-        --ensemble_alpha 1 \
-        --token_mode last \
-        --multilayer
+    # CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
+    #     --logits_ensemble_method max \
+    #     --model $MODEL \
+    #     --debug \
+    #     --dataset myriadlama \
+    #     --num_paraphrases $NUM_PARAS \
+    #     --num_fewshots $NUM_FEWSHOTS \
+    #     --num_samples 5 \
+    #     --ensemble_method ffn_activation_avg \
+    #     --ensemble_layer $LAYER \
+    #     --ensemble_alpha 1 \
+    #     --token_mode last \
+    #     --multilayer
     
-    CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
-        --logits_ensemble_method max \
-        --model $MODEL \
-        --dataset myriadlama \
-        --num_paraphrases $NUM_PARAS \
-        --num_fewshots $NUM_FEWSHOTS \
-        --num_samples 5 \
-        --ensemble_method ffn_activation_max \
-        --ensemble_layer $LAYER \
-        --ensemble_alpha 1 \
-        --token_mode last \
-        --multilayer
+    # CUDA_VISIBLE_DEVICES=$DEVICE python3 parallel_ensemble.py \
+    #     --logits_ensemble_method max \
+    #     --model $MODEL \
+    #     --debug \
+    #     --dataset myriadlama \
+    #     --num_paraphrases $NUM_PARAS \
+    #     --num_fewshots $NUM_FEWSHOTS \
+    #     --num_samples 5 \
+    #     --ensemble_method ffn_activation_max \
+    #     --ensemble_layer $LAYER \
+    #     --ensemble_alpha 1 \
+    #     --token_mode last \
+    #     --multilayer
 done

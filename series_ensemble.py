@@ -25,6 +25,7 @@ import multiprocessing as mp
 import os
 import random
 import warnings
+from ast import dump
 from pdb import set_trace
 
 import numpy as np
@@ -32,6 +33,9 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
+
+from dataset import get_dataset_instance
+from parallel_ensemble import sample_paraphrases_per_item
 
 torch.set_printoptions(profile="full", linewidth=200)
 
@@ -396,7 +400,6 @@ class FlexAttentionWrapper:
             cache_position=None,
             **kwargs,
         ):
-            # set_trace()
             if self.model.config.model_type.startswith("llama"):
                 return self.create_patched_forward_for_llama(
                     layer_idx, 
@@ -454,7 +457,7 @@ class FlexAttentionWrapper:
         self.is_patched = False
 
 @torch.no_grad()
-def flex_generation(prompt, segment_metadata, max_new_tokens=10, modify_rope=False, has_bos=True):
+def flex_generation(prompt, segment_metadata, max_new_tokens, modify_rope=False, has_bos=True):
     """
     Generate text using FlexAttention.
     - Accepts a SINGLE prompt with ALL paraphrases
@@ -594,68 +597,7 @@ def flex_generation(prompt, segment_metadata, max_new_tokens=10, modify_rope=Fal
     return generated_texts[0].strip()
 
 
-# ==============================================================================
-# Main script
-# ==============================================================================
-
-if __name__ == "__main__":
-    import argparse
-
-    from dataset import MyriadLamaDataset
-
-    parser = argparse.ArgumentParser(
-        description="MyriadLAMA-specific FlexAttention generation"
-    )
-    parser.add_argument("--model", type=str, default="llama3.2_3b_it", help="Model name from constants.MODEL_PATHs")
-    parser.add_argument("--device", type=str, default="auto", help="Device for model (default: auto)")
-    parser.add_argument(
-        "--dataset", type=str, required=True, 
-        choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa", "hotpot"], 
-        help="Dataset to use for generating paraphrases.")
-    parser.add_argument("--lemmaize", action="store_true", help="Normalize predictions and answers to lemmas")
-    parser.add_argument("--modify_rope", action="store_true", help="Modify RoPE embeddings during generation")
-    parser.add_argument("--modify_attn", action="store_true", help="Modify attention masks using FlexAttention")
-    parser.add_argument("--scale_factor", action="store_true", help="Scale attention scores using FlexAttention")
-    parser.add_argument("--num_samples", type=int, default=5, help="Number of samples to generate for testing (default: 5)")
-    parser.add_argument("--num_fewshots", type=int, default=5, help="Number of few-shot examples to use (default: 5)")
-    parser.add_argument("--num_paraphrases", type=int, default=2, help="Number of paraphrases to use (same for main question and few-shot examples, default: 5)")
-    parser.add_argument("--single_para_qapair", action="store_true", help="Use only one Q&A section for the target paraphrase")
-    parser.add_argument("--explicit_prompts", action="store_true", help="Use explicit prompt construction without few-shot examples and Q&A pairs")
-    parser.add_argument("--max_samples", type=int, default=None, help="Maximum number of samples to generate (default: None, process all)")
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size for generation (default: 1)")
-    parser.add_argument("--repeat_paras", action="store_true", help="Repeating the same paraphrase multiple times")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose output")
-    parser.add_argument("--rewrite", action="store_true", help="Rewrite existing output file")
-    args = parser.parse_args()
-
-    assert int(args.explicit_prompts) + int(args.single_para_qapair) <= 1, \
-        "Cannot use both --explicit_prompts and --single_para_qapair together."
-
-    if args.dataset == "webqa":
-        from dataset import WebQADataset
-        dataset = WebQADataset(model_name=args.model)
-    elif args.dataset == "myriadlama":
-        from dataset import MyriadLamaDataset
-        dataset = MyriadLamaDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "commonsense":
-        from dataset import CommonsenseParaphraseDataset
-        dataset = CommonsenseParaphraseDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "mmlu":
-        from dataset import MMLUParaphraseDataset
-        dataset = MMLUParaphraseDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "logiqa":
-        from dataset import LogiQAParaphraseDataset
-        dataset = LogiQAParaphraseDataset(model_name=args.model, debug=args.debug)
-    elif args.dataset == "hotpot":
-        from dataset import HotpotDataset
-        dataset = HotpotDataset(model_name=args.model, debug=args.debug)
-    else:
-        raise ValueError("Unsupported dataset. Please use 'webqa', 'myriadlama', 'commonsense', 'mmlu', 'logiqa', or 'hotpot'.")
-    
-    if args.model not in MODEL_PATHs:
-        raise ValueError(f"Model {args.model} not supported. Choose from {list(MODEL_PATHs.keys())}")
-    model_path = MODEL_PATHs.get(args.model, args.model)
-
+def get_series_ensemble_dumpfile_name(dataset, args):
     # Determine file name based on number of paraphrases
     dump_file = f"{dataset.dataset_root}/"
     if args.modify_attn:
@@ -666,94 +608,131 @@ if __name__ == "__main__":
         dump_file += "repeatparas."
     if args.scale_factor:
         dump_file += "scalescore."
-    if args.single_para_qapair:
-        dump_file += "singleparaqapair."
-    if args.explicit_prompts:
-        dump_file += "explicitprompts."
-    if args.num_fewshots != 5:
-        dump_file += f"{args.num_fewshots}fshots."
-
+    
     dump_file += f"{args.num_samples}samples.{args.num_paraphrases}paras.feather"
+    return dump_file
+
+def craft_prompts_from_baseline_file(baseline_file, thinking):
+    df = pd.read_feather(baseline_file)
+    for uuid, subdf in df.groupby('uuid'):
+        subdf = subdf.reset_index(drop=True)
+        if thinking:
+            subdf = subdf[subdf['thinking'].str.len() > 0]
+        if len(subdf) == 0:
+            print(f"⚠️  Warning: No valid thinking entries for uuid {uuid}, skipping.")
+            continue
+        
+        instructions = subdf['instruction'].tolist()
+        assert len(set(instructions)) == 1, f"Expected exactly one unique instruction per uuid, but found {len(set(instructions))} for uuid {uuid}"
+        instruction = instructions[0]
+
+        few_shot_contexts = subdf['few_shot_context'].tolist()
+        assert len(set(few_shot_contexts)) == 1, f"Expected exactly one unique few-shot context per uuid, but found {len(set(few_shot_contexts))} for uuid {uuid}"
+        few_shot_context = few_shot_contexts[0]
+        
+        yield (
+            uuid, 
+            subdf['answers'].tolist()[0].tolist(),
+            instruction,
+            few_shot_context,
+            subdf["paraphrase"].tolist(),
+            subdf["thinking"].tolist(),
+            subdf["is_orig"].tolist(),
+        ) 
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="MyriadLAMA-specific FlexAttention generation"
+    )
+    parser.add_argument("--model", type=str, default="llama3.2_3b_it", help="Model name from constants.MODEL_PATHs")
+    parser.add_argument("--device", type=str, default="auto", help="Device for model (default: auto)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose output")
+    parser.add_argument("--rewrite", action="store_true", help="Rewrite existing output file")
+    
+    # Dataset and paraphrase generation options
+    parser.add_argument(
+        "--dataset", type=str, required=True, 
+        choices=["webqa", "myriadlama", "commonsense", "mmlu", "logiqa", "hotpot"], 
+        help="Dataset to use for generating paraphrases.")
+    parser.add_argument("--baseline_file", type=str, required=True, help="Path to baseline generations file")
+    parser.add_argument("--num_samples", type=int, default=5, help="Number of samples to generate for testing (default: 5)")
+    parser.add_argument("--num_fewshots", type=int, default=5, help="Number of few-shot examples to use (default: 5)")
+    parser.add_argument("--num_paraphrases", type=int, default=2, help="Number of paraphrases to use (same for main question and few-shot examples, default: 5)")
+    parser.add_argument("--thinking", action="store_true", help="Use thinking mode")
+    parser.add_argument("--repeat_paras", action="store_true", help="Repeating the same paraphrase multiple times")
+    
+    # Series ensemble-specific options
+    parser.add_argument("--modify_rope", action="store_true", help="Modify RoPE embeddings during generation")
+    parser.add_argument("--modify_attn", action="store_true", help="Modify attention masks using FlexAttention")
+    parser.add_argument("--scale_factor", action="store_true", help="Scale attention scores using FlexAttention")
+    args = parser.parse_args()
+
+    max_new_tokens = 32
+
+    # Load dataset
+    dataset = get_dataset_instance(
+        dataset_name=args.dataset,
+        model_name=args.model,
+        debug=args.debug,
+        thinking=args.thinking,
+        additional_paraphrases_file=None,
+    )
+
+    # Determine dump file path
+    dataset.dataset_root = os.path.dirname(args.baseline_file)
+    os.makedirs(dataset.dataset_root, exist_ok=True)
+    dump_file = get_series_ensemble_dumpfile_name(dataset, args)
     if os.path.exists(dump_file) and not args.rewrite:
         print(f"✅ File {dump_file} already exists, skipping generation.")
         exit(0)
     
-    max_new_tokens = 10 if args.num_fewshots > 0 else 20
-    dataloader = dataset.get_dataloader(batch_size=1, shuffle=False)
+    group_by_uuid = craft_prompts_from_baseline_file(args.baseline_file, args.thinking)
     
     print(f"🔄 Starting generation to {dump_file}")
+    if args.model not in MODEL_PATHs:
+        raise ValueError(f"Model {args.model} not supported. Choose from {list(MODEL_PATHs.keys())}")
+    model_path = MODEL_PATHs.get(args.model, args.model)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto", dtype="auto")
     tokenizer.pad_token = tokenizer.eos_token
     has_bos = "llama" in args.model.lower()
 
     df = pd.DataFrame(columns=["uuid", "answers", "prediction", "generation", "templates"])
-    if args.max_samples:
-        print(f"Processing maximum {args.max_samples} samples")
-
-    # Get few-shot examples with multiple paraphrases (new format)
-    # Use same number of paraphrases for few-shot as for main question
-    few_shot_examples = dataset.get_few_shot_examples(k=args.num_fewshots) if args.num_fewshots > 0 else ""
-
+    
     sample_count = 0
-    samples = []
-    for batch_data in tqdm(dataloader, desc="Preparing samples", dynamic_ncols=True):
+    all_samples = []
+    for batch_data in tqdm(group_by_uuid, desc="Preparing samples", dynamic_ncols=True):
         if dataset.is_multi_choice:
-            uuids, answers, all_paraphrases, choices_labels, choices_texts, answer_labels, _ = batch_data
-        else:
-            uuids, answers, all_paraphrases, _ = batch_data
-            choices_labels = [None] * len(uuids)
-            choices_texts = [None] * len(uuids)
-            answer_labels = [None] * len(uuids)
+            raise NotImplementedError("Multi-choice datasets not implemented in MyriadLAMA FlexAttention generation yet.")
+        
+        uuid, answer, instruction, few_shot_context, paraphrases, thinkings, is_origs = batch_data
             
-        assert len(uuids) == 1, "Batch size for data preparation must be 1 for MyriadLAMA generation"
-        uuid, answer = uuids[0], answers[0]
-        choices_labels = choices_labels[0]
-        choices_texts = choices_texts[0]
-        answer_labels = answer_labels[0]
-        all_paraphrases = list(zip(*all_paraphrases))[0]
+        samples = sample_paraphrases_per_item(
+            uuid=uuid,
+            paraphrases=paraphrases, 
+            is_origs=is_origs,
+            messages=thinkings,
+            num_paraphrases=args.num_paraphrases, 
+            num_samples=args.num_samples,
+            repeat_paras=args.repeat_paras
+        )
         
-        all_indices = list(range(len(all_paraphrases)))
-        
-        if args.repeat_paras:
-            all_sampled_paras = list([[n] * args.num_paraphrases for n in all_indices])
+        for uuid, sampled_paraphrases, sampled_is_origs, sampled_thinkings in samples:
+            all_samples.append((
+                uuid, answer, instruction, few_shot_context, 
+                sampled_paraphrases, sampled_thinkings, sampled_is_origs))
+                
+    print(f"Total samples to generate: {len(all_samples)}")
+    
+    for uuid, answer, instruction, few_shot_context, sampled_paraphrases, sampled_thinkings, sampled_is_origs in \
+        tqdm(all_samples, desc="Generating", dynamic_ncols=True):
+
+        if dataset.thinking:
+            prompt, segment_metadata = dataset.construct_prompts_for_thinking(tokenizer, instruction, sampled_paraphrases, series_ensemble=True, thinkings=sampled_thinkings)
         else:
-            all_sampled_paras = itertools.permutations(
-                all_indices, args.num_paraphrases
-            )
-
-        random.seed(uuids[0])
-        for paraids in random.sample(list(all_sampled_paras), k=args.num_samples):
-            sampled_paraphrases = [all_paraphrases[i] for i in paraids]
-            samples.append((uuid, answer, sampled_paraphrases, choices_labels, choices_texts, answer_labels))
-
-    print(f"Total samples to generate: {len(samples)}")
-    sample_dataloader = torch.utils.data.DataLoader(
-        samples,
-        batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=lambda x: x,
-        num_workers=0,
-    )
-
-    for batch in tqdm(sample_dataloader, dynamic_ncols=True):
-        uuids, answers, sampled_paraphrases, choices_labels, choices_texts, answer_labels = zip(*batch)
-        batch_predictions = []
-        batch_generations = []
-        batch_templates = []
-        batch_prompts = []
-
-        if args.explicit_prompts:
-            prompt, segment_metadata = dataset.construct_explicit_prompts(paraphrases=sampled_paraphrases[0])
-        else:
-            if args.single_para_qapair:
-                prompt, segment_metadata = dataset.construct_prompts_single_para_qapair(
-                    few_shot_examples, paraphrases=sampled_paraphrases[0]
-                )
-            else:
-                prompt, segment_metadata = dataset.construct_prompts_with_paraphrases(
-                    few_shot_examples, paraphrases=sampled_paraphrases[0]
-                )
+            prompt, segment_metadata = dataset.construct_prompts(instruction, few_shot_context, sampled_paraphrases, series_ensemble=True)
         
         # Generate using MyriadLAMA-specific FlexAttention
         generation = flex_generation(
@@ -762,35 +741,21 @@ if __name__ == "__main__":
 
         # Extract prediction (first word only for MyriadLAMA)
         prediction = generation.strip().split()[0] if generation.strip() else ""
-        batch_predictions.append(prediction)
-        batch_generations.append(generation)
-        batch_templates.append(sampled_paraphrases)
-        batch_prompts.append(prompt)
         items = {
-            "uuid": uuids,
-            "paraphrases": sampled_paraphrases,
-            "prompts": batch_prompts,
-            "templates": batch_templates,
-            "answers": answers,
-            "prediction": batch_predictions,
-            "generation": batch_generations,
+            "uuid": [uuid],
+            "paraphrases": [sampled_paraphrases],
+            "is_orig": [sampled_is_origs],
+            "prompts": [prompt],
+            "answers": [answer],
+            "prediction": [prediction],
+            "generation": [generation],
         }
-
+        # set_trace()
         df = pd.concat([df, pd.DataFrame(items)], ignore_index=True)
-
-        sample_count += len(uuids)
-        if args.max_samples and sample_count >= args.max_samples:
-            print(f"Reached max_samples limit ({args.max_samples}), stopping generation")
-            break
 
     chunks = np.array_split(df, num_parts)
     with mp.get_context("spawn").Pool(num_parts, initializer=init_spacy) as pool:
         results = pool.map(lemmaize_chunk, chunks)
-    try:
-        df = append_lemmas(df, results)
-    except Exception as e:
-        print(f"❌ Lemmatization failed: {type(e).__name__}: {e}")
-        set_trace()
-    finally:
-        df.to_feather(dump_file)
-        print(f"✅ Results saved to {dump_file}")
+    df = append_lemmas(df, results)
+    df.to_feather(dump_file)
+    print(f"✅ Parallel ensemble results saved to {dump_file}")
