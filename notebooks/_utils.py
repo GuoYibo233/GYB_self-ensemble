@@ -215,50 +215,34 @@ def report_series_ensemble_accuracy_by_nshot(
 
 
 def get_parallel_ensemble_filename(
-        dump_file_prefix, repeat_paras, 
+        dump_file_prefix, repeat_paras,
         logits_ensemble_method,
-        ensemble_method, ensemble_layer,
-        multilayer, ensemble_alpha, token_mode,
         num_fewshots, num_paraphrases, num_samples):
-    # dump_file = f"{dataset_root}/{ds_name}/{model_name}/myriadlama."
     dump_file_prefix += f"logits.{logits_ensemble_method}."
     if repeat_paras:
         dump_file_prefix += "repeatparas."
-    
-    if ensemble_method == "layer_output_avg":
-        dump_file_prefix += f"avglayer.layer{ensemble_layer}.alpha{int(ensemble_alpha*100)}.token-{token_mode}."
-    elif ensemble_method == "ffn_activation_avg":
-        dump_file_prefix += f"avgffn.layer{ensemble_layer}.alpha{int(ensemble_alpha*100)}.token-{token_mode}."
-    elif ensemble_method == "ffn_activation_max":
-        dump_file_prefix += f"maxffn.layer{ensemble_layer}.alpha{int(ensemble_alpha*100)}.token-{token_mode}."
-    if multilayer:
-        dump_file_prefix += "multilayer."
     if num_fewshots != 5:
         dump_file_prefix += f"{num_fewshots}fshots."
-        
+
     dump_file = f"{dump_file_prefix}{num_samples}samples.{num_paraphrases}paras.feather"
     return dump_file
 
 def calculate_parallel_ensemble_accuracy(
-        dump_file_prefix, # Dataset root
-        repeat_paras, num_paraphrases, 
-        num_fewshots, num_samples, # Prompt construct settings
-        logits_ensemble_method, ensemble_method=None, 
-        ensemble_layer=None, multilayer=False, 
-        ensemble_alpha=1.0, token_mode="all", # Expeirment settings
-        use_generation=True, by_probs=False, 
-        is_multichoice=False, birdirect=True # Evaluation settings
+        dump_file_prefix,  # Dataset root
+        repeat_paras, num_paraphrases,
+        num_fewshots, num_samples,  # Prompt construct settings
+        logits_ensemble_method,  # Experiment settings
+        use_generation=True, by_probs=False,
+        is_multichoice=False, birdirect=True  # Evaluation settings
     ):
     filename = get_parallel_ensemble_filename(
-        dump_file_prefix=dump_file_prefix, repeat_paras=repeat_paras, 
+        dump_file_prefix=dump_file_prefix, repeat_paras=repeat_paras,
         logits_ensemble_method=logits_ensemble_method,
-        ensemble_method=ensemble_method, ensemble_layer=ensemble_layer,
-        multilayer=multilayer, ensemble_alpha=ensemble_alpha, token_mode=token_mode,
         num_fewshots=num_fewshots, num_paraphrases=num_paraphrases, num_samples=num_samples)
     if os.path.exists(filename) is False:
         print(f"File {filename} does not exist!")
         return None
-    
+
     try:
         df = pandas.read_feather(filename)
     except Exception as e:
@@ -267,14 +251,12 @@ def calculate_parallel_ensemble_accuracy(
         return None
     label = f"{num_paraphrases}paras {num_fewshots}shots "
     label += f"{'+Repeat' if repeat_paras else ''} "
-    label += f"{ensemble_method} layer{ensemble_layer} "
-    label += f"{'Multilayer' if multilayer else ''} "
-    label += f"alpha{ensemble_alpha} token-{token_mode}"
-    
+    label += f"{logits_ensemble_method}"
+
     calculate_accuracy(
-        df, label, 
-        by_probs=by_probs, 
+        df, label,
+        by_probs=by_probs,
         birdirect=birdirect,
-        use_generation=use_generation, 
+        use_generation=use_generation,
         is_multichoice=is_multichoice)
     return df

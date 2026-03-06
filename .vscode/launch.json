@@ -2,16 +2,28 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: Current File with Arguments",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": "${command:pickArgs}"
+        },
+        {
             "name": "Debug FlexAttention - WebQA",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/flex_attention_generate.py",
             "console": "integratedTerminal",
             "args": [
-                "--dataset", "webqa",
-                "--model", "llama3.2_3b_it",
-                "--num_paraphrases", "3",
-                "--device", "cuda"
+                "--dataset",
+                "webqa",
+                "--model",
+                "llama3.2_3b_it",
+                "--num_paraphrases",
+                "3",
+                "--device",
+                "cuda"
             ],
             "justMyCode": false,
             "stopOnEntry": true,
@@ -24,10 +36,14 @@
             "program": "${workspaceFolder}/flex_attention_generate.py",
             "console": "integratedTerminal",
             "args": [
-                "--dataset", "myriadlama",
-                "--model", "llama3.2_3b_it",
-                "--num_paraphrases", "3",
-                "--device", "cuda"
+                "--dataset",
+                "myriadlama",
+                "--model",
+                "llama3.2_3b_it",
+                "--num_paraphrases",
+                "3",
+                "--device",
+                "cuda"
             ],
             "justMyCode": false,
             "stopOnEntry": true,
@@ -40,10 +56,14 @@
             "program": "${workspaceFolder}/tools/debug_flexattention.py",
             "console": "integratedTerminal",
             "args": [
-                "--dataset", "webqa",
-                "--model", "llama3.2_3b_it",
-                "--max-samples", "2",
-                "--max-tokens", "5",
+                "--dataset",
+                "webqa",
+                "--model",
+                "llama3.2_3b_it",
+                "--max-samples",
+                "2",
+                "--max-tokens",
+                "5",
                 "--verbose"
             ],
             "justMyCode": false
@@ -55,10 +75,14 @@
             "program": "${workspaceFolder}/tools/debug_flexattention.py",
             "console": "integratedTerminal",
             "args": [
-                "--dataset", "myriadlama",
-                "--model", "llama3.2_3b_it",
-                "--max-samples", "1",
-                "--max-tokens", "5",
+                "--dataset",
+                "myriadlama",
+                "--model",
+                "llama3.2_3b_it",
+                "--max-samples",
+                "1",
+                "--max-tokens",
+                "5",
                 "--verbose"
             ],
             "justMyCode": false,
@@ -84,10 +108,14 @@
             "program": "${workspaceFolder}/generate.py",
             "console": "integratedTerminal",
             "args": [
-                "--method", "per_prompt",
-                "--dataset", "webqa",
-                "--model", "llama3.2_3b_it",
-                "--num_ensemble", "3"
+                "--method",
+                "per_prompt",
+                "--dataset",
+                "webqa",
+                "--model",
+                "llama3.2_3b_it",
+                "--num_ensemble",
+                "3"
             ],
             "justMyCode": false
         },
@@ -98,10 +126,14 @@
             "program": "${workspaceFolder}/generate.py",
             "console": "integratedTerminal",
             "args": [
-                "--method", "avg",
-                "--dataset", "webqa",
-                "--model", "llama3.2_3b_it",
-                "--num_ensemble", "3"
+                "--method",
+                "avg",
+                "--dataset",
+                "webqa",
+                "--model",
+                "llama3.2_3b_it",
+                "--num_ensemble",
+                "3"
             ],
             "justMyCode": false
         }

@@ -27,15 +27,10 @@ num_parts = 8
 def ensemble_generation(
     model,
     tokenizer,
-    prompts, 
-    integration_method="max", 
-    weights=None, 
+    prompts,
+    integration_method="max",
+    weights=None,
     max_new_tokens=32,
-    ensemble_method=None, 
-    multilayer=False, 
-    token_mode="last",
-    ensemble_layer_idx=10, 
-    ensemble_alpha=1.0, 
     choice_labels=None):
 
     tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -46,43 +41,25 @@ def ensemble_generation(
     generated = None
     past_key_values = None
     inputs = tokenizer(
-        prompts, return_tensors="pt", 
+        prompts, return_tensors="pt",
         padding=True, truncation=True,
         padding_side='left', return_attention_mask=True).to(model.device)
     input_ids = inputs["input_ids"]
     attention_mask = inputs["attention_mask"]
-    
+
     current_model_input = input_ids
-    max_layer = len(_get_blocks(model))
-    if multilayer:
-        layer_indices = list(range(ensemble_layer_idx, max_layer))
-    else:
-        layer_indices = [ensemble_layer_idx]
-    
+
     label_probs = None
     for step in range(max_new_tokens):
         with torch.no_grad():
-            if ensemble_method is None:
-                outputs = model(
-                    input_ids=current_model_input,
-                    attention_mask=attention_mask,
-                    use_cache=True,
-                    past_key_values=past_key_values
-                )
-                logits = outputs.logits[:, -1, :]
-                past_key_values = outputs.past_key_values
-            elif ensemble_method == "layer_output_avg":
-                logits = next_token_logits_with_weighted_layer_outavg(
-                    model, input_ids, attention_mask, 
-                    layer_indices=layer_indices, alpha=ensemble_alpha, 
-                    weights=None, token_mode=token_mode)
-            elif ensemble_method.startswith("ffn_activation"):
-                logits = next_token_logits_with_weighted_ffn_midavg(
-                    model, input_ids, attention_mask,
-                    layer_indices=layer_indices, alpha=ensemble_alpha, 
-                    weights=None, token_mode=token_mode, use_max=(ensemble_method=="ffn_activation_max"))
-            else:
-                raise ValueError(f"Unknown ensemble method: {ensemble_method}")
+            outputs = model(
+                input_ids=current_model_input,
+                attention_mask=attention_mask,
+                use_cache=True,
+                past_key_values=past_key_values
+            )
+            logits = outputs.logits[:, -1, :]
+            past_key_values = outputs.past_key_values
         
         if integration_method == "avg":
             logits = logits.mean(dim=0)
@@ -189,237 +166,9 @@ def sample_paraphrases_per_item(
     return all_samples
 
 
-def _get_blocks(model):
-    # Covers many HF causal LMs (LLaMA/Mistral/Qwen2/GPTNeoX/Falcon variations need small tweaks)
-    if hasattr(model, "model") and hasattr(model.model, "layers"):      # LLaMA/Mistral/Qwen2
-        return model.model.layers
-    if hasattr(model, "gpt_neox") and hasattr(model.gpt_neox, "layers"): # GPT-NeoX
-        return model.gpt_neox.layers
-    if hasattr(model, "transformer") and hasattr(model.transformer, "h"): # GPT-2 style
-        return model.transformer.h
-    raise ValueError("Unsupported architecture: can't locate transformer blocks.")
-
-def _get_ffn_out_proj(block):
-    """
-    Return the FFN output projection module where we can pre-hook
-    to edit the *middle* FFN activations (the input to this projection).
-
-    - LLaMA/Mistral/Qwen2: block.mlp.down_proj
-    - GPT-2:              block.mlp.c_proj
-    - GPT-NeoX:           block.mlp.dense_4h_to_h
-    """
-    mlp = getattr(block, "mlp", None)
-
-    # Some models name it "feed_forward" or "ffn"
-    if mlp is None:
-        mlp = getattr(block, "feed_forward", None)
-    if mlp is None:
-        mlp = getattr(block, "ffn", None)
-
-    if mlp is None:
-        raise ValueError(f"Can't find MLP/FFN module inside block: {type(block)}")
-
-    for attr in ("down_proj", "c_proj", "dense_4h_to_h", "fc2"):
-        if hasattr(mlp, attr):
-            return getattr(mlp, attr)
-
-    raise ValueError(f"Unsupported FFN structure in block: {type(block)} / mlp: {type(mlp)}")
-
-
-def _weighted_batch_average(x_last: torch.Tensor, weights: torch.Tensor | None):
-    """
-    x_last: [B, D]
-    weights: [B] or [B,1] or None
-    returns: [1, D] weighted mean (keepdim on batch)
-    """
-    if weights is None:
-        return x_last.mean(dim=0, keepdim=True)
-
-    w = weights.to(device=x_last.device, dtype=x_last.dtype)
-    if w.dim() == 2 and w.size(1) == 1:
-        w = w.squeeze(1)
-    assert w.dim() == 1 and w.numel() == x_last.size(0), (w.shape, x_last.shape)
-
-    denom = w.sum().clamp_min(torch.finfo(x_last.dtype).eps)
-    return (x_last * w[:, None]).sum(dim=0, keepdim=True) / denom
-
-def ensemble_transformer_layer_output(
-        alpha=1, token_mode="last", weights=None):
-    """
-    attention_mask: [B,T] int/bool tensor (on same device)
-    """
-    def hook(module, inputs, output):
-        if isinstance(output, tuple):
-            hidden_states = output[0]
-            rest = output[1:]
-        else:
-            hidden_states = output
-            rest = None
-
-        if weights is not None:
-            assert weights.dim() == 1 and weights.numel() == hidden_states.shape, (weights.shape, hidden_states.shape)
-
-        if token_mode == "last":
-            x_last = hidden_states[:, -1, :]
-            mean_last = _weighted_batch_average(x_last, weights)  # [1, D]
-            hidden_states[:, -1, :] = x_last * (1 - alpha) + mean_last * alpha
-        elif token_mode == "all":
-            if weights is None:
-                mean_emb = hidden_states.mean(dim=0, keepdim=True)
-            else:
-                denom = weights.sum().clamp_min(torch.finfo(hidden_states.dtype).eps)
-                mean_emb = (hidden_states * weights[:, None, None]).sum(dim=0, keepdim=True) / denom
-            hidden_states = hidden_states * (1 - alpha) + mean_emb * alpha
-
-        if rest is None:
-            return hidden_states
-        return (hidden_states, *rest)
-    return hook
-
-@torch.no_grad()
-def next_token_logits_with_weighted_layer_outavg(
-    model, input_ids, attention_mask,
-    layer_indices: list[int],
-    alpha: float = 1.0, 
-    weights: torch.Tensor | None = None,
-    token_mode: str = "last"):
-
-    blocks = _get_blocks(model)
-    assert all(0 <= idx < len(blocks) for idx in layer_indices), (layer_indices, len(blocks))
-
-    hook = ensemble_transformer_layer_output(alpha=alpha, token_mode=token_mode, weights=weights)
-    handles = []
-    for idx in layer_indices:
-        handles.append(blocks[idx].register_forward_hook(hook))
-
-    try:
-        out = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False, return_dict=True)
-    finally:
-        for handle in handles:
-            handle.remove()
-
-    logits = out.logits
-    T = attention_mask.size(1)
-    idx = torch.arange(T, device=attention_mask.device).unsqueeze(0).expand_as(attention_mask)
-    last_pos = (idx * attention_mask).max(dim=1).values.long()
-    next_logits = logits[torch.arange(logits.size(0), device=logits.device), last_pos]  # [B,V]
-    return next_logits
-
-def make_ffn_mid_activation_hook(
-    attention_mask: torch.Tensor,
-    weights: torch.Tensor | None = None,
-    alpha: float = 1.0,
-    token_mode: str = "last", # "last" or "all"
-    use_max: bool = False
-):
-    """
-    Returns a forward *pre*-hook that edits the input to the FFN output projection.
-    - token_mode="last": only edits the last real token per sample (using attention_mask)
-    - token_mode="all": edits all time positions (more aggressive)
-    """
-    assert token_mode in ("last", "all")
-
-    def pre_hook(module, inputs):
-        (x, *rest) = inputs  # x is the input to the projection: typically [B,T,Hff] or [T,B,Hff] depending on model
-        if not torch.is_tensor(x):
-            return inputs
-
-        # Assume [B,T,D]
-        B, T, D = x.shape
-        am = attention_mask.to(device=x.device)
-        assert am.shape[0] == B and am.shape[1] == T, (am.shape, x.shape)
-
-        if token_mode == "all":
-            for t in range(T):
-                if not use_max:
-                    mean_t = _weighted_batch_average(x[:, t, :], weights)  # [1,D]
-                else:
-                    mean_t = x[:, t, :].max(dim=0, keepdim=True).values  # [1,D]
-                x[:, t, :] = x[:, t, :] * (1 - alpha) + mean_t * alpha
-        else:
-            # Only last real token per sample
-            idx = torch.arange(T, device=x.device).unsqueeze(0).expand_as(am)  # [B,T]
-            last_pos = (idx * am).max(dim=1).values.long()  # [B]
-
-            rows = torch.arange(B, device=x.device)
-            x_last = x[rows, last_pos, :]  # [B,D]
-            if not use_max:
-                mean_last = _weighted_batch_average(x_last, weights)
-            else:
-                mean_last = x_last.max(dim=0, keepdim=True).values
-            x[rows, last_pos, :] = x_last * (1 - alpha) + mean_last * alpha
-        return (x, *rest)
-
-    return pre_hook
-
-@torch.no_grad()
-def next_token_logits_with_weighted_ffn_midavg(
-    model,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    layer_indices: list[int] | tuple[int, ...],
-    alpha: float = 1.0,
-    weights: torch.Tensor | None = None,
-    token_mode: str = "last",  # "last" or "all"
-    use_max: bool = False,
-):
-    """
-    Apply weighted batch-averaging to the FFN middle activations (input to FFN out proj)
-    at the specified transformer layers, then return next-token logits at each sample's
-    last real position.
-
-    weights: None -> simple mean
-             Tensor [B] (or [B,1]) -> weighted mean across batch
-    alpha:   blend alpha (0=no change, 1=replace with mean)
-    """
-    blocks = _get_blocks(model)
-    L = len(blocks)
-    for li in layer_indices:
-        assert 0 <= li < L, (li, L)
-
-    pre_hook = make_ffn_mid_activation_hook(
-        attention_mask=attention_mask,
-        weights=weights,
-        alpha=alpha,
-        token_mode=token_mode,
-        use_max=use_max,
-    )
-
-    handles = []
-    try:
-        for li in layer_indices:
-            proj = _get_ffn_out_proj(blocks[li])
-            handles.append(proj.register_forward_pre_hook(pre_hook))
-
-        out = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            use_cache=False,
-            return_dict=True,
-        )
-    finally:
-        for h in handles:
-            h.remove()
-
-    logits = out.logits  # [B,T,V]
-    B, T, V = logits.shape
-
-    idx = torch.arange(T, device=attention_mask.device).unsqueeze(0).expand_as(attention_mask)
-    last_pos = (idx * attention_mask).max(dim=1).values.long()  # [B]
-    next_logits = logits[torch.arange(B, device=logits.device), last_pos]  # [B,V]
-    return next_logits
 
 def get_parallel_ensemble_dumpfile(dataset, args):
     dump_file = f"{dataset.dataset_root}/parallel.{args.logits_ensemble_method}."
-    if args.ensemble_method == "layer_output_avg":
-        dump_file += f"avglayer.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
-    elif args.ensemble_method == "ffn_activation_avg":
-        dump_file += f"avgffn.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
-    elif args.ensemble_method == "ffn_activation_max":
-        dump_file += f"maxffn.layer{args.ensemble_layer}.alpha{int(args.ensemble_alpha*100)}.token-{args.token_mode}."
-    if args.multilayer:
-        dump_file += "multilayer."
-    
     dump_file += f"{args.num_samples}samples.{args.num_paraphrases}paras.feather"
     return dump_file
 
@@ -476,16 +225,9 @@ if __name__ == "__main__":
     parser.add_argument("--num_paraphrases", type=int, default=-1, help="Number of paraphrases to use in each sample (default: 2)")    
 
     # Ensemble parameters
-    parser.add_argument("--logits_ensemble_method", type=str, default="avg", 
+    parser.add_argument("--logits_ensemble_method", type=str, default="avg",
                         choices=["max", "avg", "weighted_avg", "weighted_max"],
                         help="Integration method for ensemble generation")
-    parser.add_argument("--ensemble_method", type=str, default=None, 
-                        choices=["layer_output_avg", "ffn_activation_avg", "ffn_activation_max"], 
-                        help="Method for ensemble internal states within Transformer layers, by either using layer outputs or FFN activations")
-    parser.add_argument("--ensemble_layer", type=int, default=16, help="Transformer layer index to apply ensemble merging")
-    parser.add_argument("--ensemble_alpha", type=float, default=1.0, help="alpha for ensemble merging of transformer outputs")
-    parser.add_argument("--multilayer", action="store_true", help="Use only a single layer's output for ensemble (not used currently)")
-    parser.add_argument("--token_mode", type=str, default="last", choices=["last", "all"], help="Token mode")
     parser.add_argument("--thinking", action="store_true", help="Enable thinking mode")
     
     args = parser.parse_args()    
@@ -582,15 +324,10 @@ if __name__ == "__main__":
         generation, label_probs = ensemble_generation(
             model,
             tokenizer,
-            prompts=sampled_messages, 
+            prompts=sampled_messages,
             integration_method=args.logits_ensemble_method,
-            weights=[confidences] if confidences else None, 
-            max_new_tokens=max_new_tokens, 
-            ensemble_method=args.ensemble_method,
-            ensemble_layer_idx=args.ensemble_layer - 1,
-            ensemble_alpha=args.ensemble_alpha, 
-            token_mode=args.token_mode,
-            multilayer=args.multilayer, 
+            weights=[confidences] if confidences else None,
+            max_new_tokens=max_new_tokens,
             choice_labels=dataset.choice_labels)
         
         labels, label_probs = zip(*label_probs) if label_probs else ([], [])
