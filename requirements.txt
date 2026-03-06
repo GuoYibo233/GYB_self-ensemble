@@ -32,6 +32,7 @@ matplotlib>=3.7.0
 
 # Progress bars and utilities
 tqdm>=4.65.0
+rich>=13.0.0
 
 # File formats
 feather-format
