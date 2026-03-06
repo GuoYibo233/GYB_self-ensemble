@@ -1,0 +1,42 @@
+# parallel_ensemble_default.yaml
+# Run with: CUDA_VISIBLE_DEVICES=0 python3 parallel_ensemble.py --config configs/parallel_ensemble_default.yaml
+
+# ── Model & dataset ──────────────────────────────────────────────────────────
+model: qwen3_8b
+dataset: myriadlama          # webqa | myriadlama | commonsense | mmlu | logiqa | hotpot
+device: cuda
+
+# ── Input ────────────────────────────────────────────────────────────────────
+baseline_file: /path/to/baseline.feather
+additional_paraphrases_file: null
+
+# ── Prompt override (optional) ───────────────────────────────────────────────
+# If set, prompts are rebuilt from the raw paraphrase column using these values
+# instead of the pre-built prompts stored in the baseline feather.
+#
+# few_shot_context: literal string pasted directly into the prompt, e.g.:
+#   few_shot_context: |
+#     Q: What is the capital of France?
+#     A: Paris
+#
+#     Q: Who wrote Hamlet?
+#     A: Shakespeare
+#
+# instruction: override the task instruction line, e.g.:
+#   instruction: "Answer the following question in one word."
+few_shot_context: null
+instruction: null
+
+# ── Paraphrase sampling ───────────────────────────────────────────────────────
+num_paraphrases: 5           # paraphrases per ensemble step; -1 = use all
+num_samples: 1               # permutation draws per UUID (reproducible via uuid seed)
+repeat_paras: false          # if true, repeat same paraphrase N times instead of permutations
+
+# ── Ensemble ─────────────────────────────────────────────────────────────────
+logits_ensemble_method: avg  # avg | max | weighted_avg | weighted_max
+thinking: false              # Qwen3 thinking mode (chain-of-thought conditioning)
+
+# ── Run scope ────────────────────────────────────────────────────────────────
+# max_uuids: limit run to the first N unique questions (useful for spot-checks)
+# Omit or set to null to run the full dataset.
+max_uuids: null

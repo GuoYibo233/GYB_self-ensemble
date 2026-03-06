@@ -1,0 +1,22 @@
+# parallel_ensemble_hotpot_think.yaml
+# Thinking-mode ensemble on HotpotQA with Qwen3-8B.
+# Run with: CUDA_VISIBLE_DEVICES=0 python3 parallel_ensemble.py --config configs/parallel_ensemble_hotpot_think.yaml
+
+model: qwen3_8b
+dataset: hotpot
+device: cuda
+
+baseline_file: /path/to/hotpot_baseline_think.feather
+additional_paraphrases_file: null
+
+few_shot_context: null
+instruction: null
+
+num_paraphrases: 4
+num_samples: 5
+repeat_paras: false
+
+logits_ensemble_method: avg
+thinking: true
+
+max_uuids: null

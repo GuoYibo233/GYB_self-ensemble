@@ -38,6 +38,9 @@ GYB_self-ensemble/
 ├── parallel_ensemble.py     # Step 2a: logit/hidden-state parallel ensemble
 ├── series_ensemble.py       # Step 2b: FlexAttention series ensemble
 ├── confidence.py            # Token-level confidence scoring utilities
+├── configs/                 # YAML config files for parallel_ensemble.py
+│   ├── parallel_ensemble_default.yaml
+│   └── parallel_ensemble_hotpot_think.yaml
 ├── notebooks/
 │   ├── _utils.py            # Evaluation helpers (accuracy, layer config, filenames)
 │   ├── test_eval.py
@@ -68,20 +71,11 @@ bash scripts/default_ensemble_match_eval.sh <DEVICE> <DATASET> <MODEL_TYPE> <NUM
 # Step 1 – Baseline generation
 CUDA_VISIBLE_DEVICES=0 python3 generate_baseline.py \
     --model qwen3_8b --dataset myriadlama --method per_prompt \
-    --num_fewshots 5 --debug
+    --num_fewshots 5
 
-# Step 2a – Parallel ensemble (logit averaging)
+# Step 2a – Parallel ensemble via config file
 CUDA_VISIBLE_DEVICES=0 python3 parallel_ensemble.py \
-    --model qwen3_8b --dataset myriadlama \
-    --logits_ensemble_method avg --num_paraphrases 5 --num_samples 1 \
-    --baseline_file <path_to_baseline.feather>
-
-# Step 2a – Parallel ensemble (hidden-state averaging at a specific layer)
-CUDA_VISIBLE_DEVICES=0 python3 parallel_ensemble.py \
-    --model qwen3_8b --dataset myriadlama \
-    --ensemble_method layer_output_avg --layer 27 \
-    --num_paraphrases 5 --num_samples 1 \
-    --baseline_file <path_to_baseline.feather>
+    --config configs/parallel_ensemble_default.yaml
 
 # Step 2b – Series ensemble (full modification set)
 CUDA_VISIBLE_DEVICES=0 python3 series_ensemble.py \
@@ -93,6 +87,38 @@ CUDA_VISIBLE_DEVICES=0 python3 series_ensemble.py \
 # Self-paraphrase generation (generates paraphrases using the target model)
 bash scripts/paraphrase.sh <DEVICE> <DATASET> <MODEL>
 ```
+
+### parallel_ensemble.py config file
+
+`parallel_ensemble.py` accepts a single `--config` argument pointing to a YAML file.
+All runtime parameters live in the YAML:
+
+```yaml
+model: qwen3_8b
+dataset: myriadlama
+baseline_file: /path/to/baseline.feather
+
+# Prompt override (optional) — rebuild prompts with custom text instead of
+# using the pre-built prompts stored in the baseline feather.
+few_shot_context: |        # literal string injected as few-shot context
+  Q: What is the capital of France?
+  A: Paris
+instruction: "Answer in one word."
+
+num_paraphrases: 5         # -1 = use all available
+num_samples: 1
+logits_ensemble_method: avg  # avg | max | weighted_avg | weighted_max
+thinking: false
+
+# Limit to the first N UUIDs (replaces --debug); null = full dataset
+max_uuids: null
+```
+
+Outputs are written to `<baseline_dir>/parallel.{method}.{S}samples.{P}paras.{YYYYMMDD_HHMMSS}.feather`
+(timestamp suffix — never overwrites previous runs).
+
+Structured logs are written to `<baseline_dir>/logs/parallel_ensemble_{YYYYMMDD_HHMMSS}.log`
+containing: config path, full config dict, start/end timestamps, output filename, success/failure status.
 
 ### Thinking mode (Qwen3 only)
 
@@ -225,9 +251,11 @@ All outputs are `.feather` format (fast columnar I/O via PyArrow).
 | Stage | Filename pattern |
 |---|---|
 | Baseline | `{ds_name}paraphrase.perprompt.{N}fshots.{model}.feather` |
-| Parallel (logits) | `parallel.{method}.{S}samples.{P}paras.feather` |
-| Parallel (hidden-state) | `parallel.avg.avglayer.layer{N}.alpha{N}.token-last.multilayer.{S}samples.{P}paras.feather` |
+| Parallel (logits) | `parallel.{method}.{S}samples.{P}paras.{YYYYMMDD_HHMMSS}.feather` |
+| Parallel (hidden-state) | `parallel.avg.avglayer.layer{N}.alpha{N}.token-last.multilayer.{S}samples.{P}paras.{YYYYMMDD_HHMMSS}.feather` |
 | Series | `modifyattn.modifyrope.scalescore.{S}samples.{P}paras.feather` |
+
+Parallel ensemble filenames include a timestamp — re-running with the same config creates a new file rather than overwriting the previous result.
 
 #### DataFrame columns
 
@@ -263,11 +291,14 @@ All outputs are `.feather` format (fast columnar I/O via PyArrow).
 
 ## Development Conventions
 
+### Addressing the developer
+Always address the user as **dungeon master**. When acknowledging a task or confirming you will proceed, say **"yes sir"**.
+
 ### Code style
 - Python files use standard library + HuggingFace Transformers + PyTorch patterns
 - `argparse` for CLI arguments in all main scripts
-- Batch size, debug mode, and num_workers are runtime arguments, not hardcoded
-- `--debug` flag limits dataset to 200 samples for fast iteration
+- Batch size and num_workers are runtime arguments, not hardcoded
+- `parallel_ensemble.py` uses `max_uuids` in its YAML config to limit run scope (e.g. `max_uuids: 10`); other scripts still use `--debug` to limit to 200 samples
 
 ### Path configuration
 - All paths derived from `$USER` in `constants.py` and `utils.py`; do not hardcode paths
